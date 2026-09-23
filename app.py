@@ -126,6 +126,31 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 SESSIONS = {}
 
 # ---------- 1. 感知层：情绪 / 实体 / 意图（mock；接 LLM 后替换这部分） ----------
+def llm_understand_intent(text: str, current_product: str | None) -> dict:
+    """LLM 前置理解：判断用户这句话是在延续旧问题，还是在说一个新问题。
+    返回 {is_new_topic: bool, mentioned_product: str|None, is_irrelevant: bool}"""
+    sys = """You are an intent understanding module for Anker after-sales support.
+Given the user's message and the current product in the conversation, decide:
+1. Is the user starting a NEW topic (different product, completely unrelated question, or greeting)?
+2. If they mentioned a product, what is it? (e.g. breast pump, robot vacuum, power bank, earbuds)
+3. Is this message completely unrelated to Anker electronics (e.g. asking about a paper box, shipping, etc.)?
+
+Reply in JSON only:
+{"is_new_topic": true/false, "mentioned_product": "product name or null", "is_irrelevant": true/false}"""
+    user = f"Current product in conversation: {current_product or 'none'}\nUser message: {text}"
+    out = call_llm(sys, user, timeout=8)
+    if not out:
+        # LLM 不可用：保守返回，不重置
+        return {"is_new_topic": False, "mentioned_product": None, "is_irrelevant": False}
+    try:
+        # 提取 JSON
+        m = re.search(r'\{[^}]*\}', out, re.DOTALL)
+        if m:
+            return json.loads(m.group(0))
+    except:
+        pass
+    return {"is_new_topic": False, "mentioned_product": None, "is_irrelevant": False}
+
 def detect_emotion(text: str) -> str:
     t = text.lower()
     if re.search(r"complain|ridiculous|unacceptable|lawyer|better business", t):
@@ -326,6 +351,32 @@ def chat():
             case["warranty"] = "UNKNOWN"
 
     pr = resolve_product(text, sku)
+    
+    # LLM 前置理解：判断是不是新话题/无关问题
+    intent = llm_understand_intent(text, case.get("product", {}).get("name") if case.get("product") else None)
+    
+    # 如果是完全无关的问题（比如纸箱子），重置 case 并友好说明
+    if intent.get("is_irrelevant") and not intent.get("mentioned_product"):
+        case["product"] = None
+        case["warranty"] = "UNKNOWN"
+        case["dealer"] = "UNKNOWN"
+        case["troubleshooting"] = "NOT_STARTED"
+        return jsonify({
+            "reply": "I'm sorry, but it looks like this might not be about an Anker product — "
+                     "we only handle support for Anker electronics (chargers, robot vacuums, earbuds, etc.). "
+                     "Could you tell me which product you're having trouble with? 🤔",
+            "cards": [],
+            "trace": {"emotion": emotion, "scope": scope, "product": "—", "order": order_id or "未提供",
+                      "warranty": "—", "dealer": "—", "troubleshooting": "—",
+                      "allowed": ["ask_product", "search_knowledge"], "forbidden": ["propose_replacement", "direct_refund"],
+                      "reasons": ["LLM 意图识别：用户问题与 Anker 电子产品无关，重置 case，引导正确产品"]}
+        })
+    
+    # 如果是新话题，重置产品和排障状态
+    if intent.get("is_new_topic") and intent.get("mentioned_product"):
+        case["product"] = None
+        case["troubleshooting"] = "NOT_STARTED"
+    
     if pr["product"]:
         case["product"] = pr["product"]
         case["product_state"] = pr["state"]
