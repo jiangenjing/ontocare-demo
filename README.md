@@ -1,58 +1,34 @@
-# OntoCare — Anker 售后 Agent 最小可用版（MVP）
+# OntoCare：本体约束的多轮售后演示
 
-> 对应方案里"初始版本开发：导入业务文档后半小时生成可运行 demo"。
-> 现在的状态：**业务文档（JSON）+ Decision Ontology 规则引擎已经跑通并验证**；
-> LLM 尚未接入（当前用模板回复），留好接口，填 key 即可切换真模型。
+此仓库部署到 Railway 项目 `innovative-bravery`，保留原有域名。页面左侧是对话，右侧显示业务阶段、槽位来源、产品与订单证据、允许和禁止的动作。产品、订单、知识与政策数据均为**模拟测试资料**，不是安克官方订单或政策。
 
-## 一句话
-大模型只负责"听懂人话"；**质保、经销商、动作资格这些确定性判断，全部由 `app.py` 里的规则函数确定性计算**——LLM 只能在 `allowed_actions` 里选，想越权也做不到。
+## 多轮对话的四个机制
 
-## 现在已经具备
-- **真 LLM**：DeepSeek 生成话术，但只能在后端规则算出的 allowed_actions 里选；
-- **双视图前端**：左用户对话（含图片上传 📷），右实时 Decision Trace（情绪/证据/产品/订单/质保/经销商/允许·禁止动作/决策理由）；
-- **本体约束检索**：先定产品，再在该产品知识范围内做 TF-IDF 检索，避免跨产品污染；无答案时诚实转人工、不编造；
-- **20 个 Golden Case 回归**：`python eval.py`，规则层 100% 通过。
+| 机制 | 本项目实现 | 边界 |
+| --- | --- | --- |
+| 对话状态跟踪 | `dialogue.phase_for` 维护 `CONSULTATION → VERIFY → TROUBLESHOOT → REVIEW → CLOSED`，订单/产品切换会重新计算阶段 | REVIEW 只是资料审核阶段，不代表审批通过 |
+| 槽位填充 | `slots_view` 区分用户陈述、测试订单、模拟知识与未核验凭证；回复不重复索取已有订单号 | 测试订单命中不等于咨询者拥有该订单 |
+| 上下文记忆 | 同一会话保留最近四轮脱敏对话、故障描述和用户反馈；模型理解请求会读取这些上下文，步骤追问从当前产品的模拟知识条目回答 | 单 worker 内存，服务重启会丢失；不是跨设备身份记忆 |
+| 结束语识别 | 完整的“没 / 不用了 / 谢谢”等话语关闭案件；“没有订单”不触发关闭；旧证据留在右侧，新问题要点“新建案件” | 目前仅覆盖显式短结束语 |
 
-## 怎么跑
-```bash
-cd ankercare-mvp
-pip install flask
-export LLM_API_KEY="apiany 的 key"          # 文本主模型 gpt-5.6
-export VISION_API_KEY="百炼工作空间 key"     # 视觉 qwen3-vl-flash
-python3 app.py                          # 打开 http://127.0.0.1:5000
-python3 eval.py                         # 跑回归评测（规则层 20/20）
-```
-- 文本：gpt-5.6 真生成话术，但只能在后端 `allowed_actions` 里选；
-- 视觉：上传故障图 → **qwen3-vl-flash 真读**出 model/sku/error_code → 作为 PROBABLE 证据进 Decision Trace，并要求"以订单复核为准"。
-左侧对话，右侧实时显示 Decision Trace（情绪/产品消歧/质保/经销商/允许动作/被禁动作）。
+这些设计参考 [阿里 AliMe Assist 论文](https://arxiv.org/abs/1801.05032) 的意图路由、上下文补全与槽位填充，以及 [在线购物任务型对话论文](https://ojs.aaai.org/index.php/AAAI/article/view/11182) 的对话状态跟踪。[阿里 DAMO ConvAI](https://github.com/AlibabaResearch/DAMO-ConvAI) 是公开研究代码集合，不等同于店小蜜生产系统。本仓库没有复制其服务代码或宣称复现其效果。
 
-## 已经验证通过的 5 个 Golden Case（规则层）
-| Case | 输入 | 系统行为 |
-|---|---|---|
-| ① S1 Pro 消歧 | "My S1 Pro not sucking" + ORD-2001 | 按订单 SKU 识别成**吸奶器**（不是扫地机），在保+授权，禁止直接退款 |
-| ② 订单查无 | ORD-9999 要换货 | warranty=**UNKNOWN**，禁止判"过保"、禁止换货/退款，转而问国家和卖家 |
-| ③ 在保+要退款 | ORD-2002 "refund now!!!" | 识别成**愤怒情绪**，订单定位扫地机；`direct_refund` 被规则**直接拦住** |
-| ④ 过保 | ORD-2003 | 只能付费维修/转人工，免费换货、退款均不可用 |
-| ⑤ 非授权经销商 | ORD-2004（在保但非授权） | 引导联系购买渠道，不进入官方保修 |
+## 运行
 
-## 文件结构
-```
-ankercare-mvp/
-├── app.py              # 后端：规则引擎(Decision Ontology) + LLM 适配层(待接)
-├── data/
-│   ├── products.json   # 产品+别名（含 S1 Pro=吸奶器&扫地机 同名歧义）
-│   ├── orders.json     # 订单：在保/过保/查无/非授权 四种样本
-│   ├── dealers.json    # 经销商：Country 精确 + Seller 模糊匹配
-│   ├── kb.json         # 排障知识库（按 产品+故障 组织）
-│   └── policies.json   # 质保/换货/退款规则、风险等级、情绪策略
-└── static/index.html   # 双视图前端：左对话 + 右 Decision Trace
-```
+设置 Python 3.11+ 环境并安装 `requirements.txt`，然后在服务端设置 `LLM_BASE_URL`、`LLM_MODEL`、`LLM_API_KEY`，运行 `python app.py`。不要把密钥提交到 Git。浏览器打开 `http://127.0.0.1:5000/`。未配置模型时右侧标记 `NOT_CONFIGURED`，仅可验证模拟规则；模型接口失败返回 503，不播放固定案例。
 
-## 下一步：接真 LLM（约 30 分钟）
-在 `app.py` 的 `build_reply()` 处，把模板替换成一次 LLM 调用：
-- 系统提示词里喂入：用户问题 + 检索到的 kb + **后端算出的 allowed_actions**；
-- 要求模型"只能从 allowed_actions 里选，并引用证据"；
-- 推荐用赛题给的**阿里云百炼**（或任意 OpenAI 兼容接口）；
-- 多模态/图片：二期再接 Vision 模型，现在文本跑通即可。
+## 验证
 
-接完 LLM，再做进阶迭代：真向量检索（FAISS/Chroma）→ 接图片识别 → 接 Mock 换货 Tool 生成取件单。
+- `python eval_safe.py`：20 条模拟规则断言。
+- `python -m unittest discover -s tests -p 'test_*.py' -q`：路由、状态、槽位、结束语和历史脱敏测试。
+- `python tests/evaluate_endpoint.py`：20 条问题集接口检查。
+- `python tests/evaluate_multiturn.py`：四段共 17 轮的案件记忆、步骤追问、物流跟进和产品冲突检查。加 `--real` 会调用当前环境的真实模型并要求 `model_status=OK`。
+
+测试通过率是**预设安全与上下文断言**，不是客户问题解决率。
+
+## 安全边界与已知限制
+
+- 质保与经销商由 Python 规则根据模拟资料计算；用户更正日期只记为待核验陈述。没有订单归属验证、退款、换货、工单或人工转接执行器。
+- 模型输出仅作为候选理解；不能写入可信订单字段、审批结果或回执。回复中的高风险状态由后端固定生成。
+- 最近四轮文本只做简单邮箱与手机号遮盖；不应输入真实客户隐私资料。会话 ID 保存在浏览器 `sessionStorage`，不是用户认证。
+- 图片识别、上传滥用防护、长期会话持久化与官方知识库引用尚未完成生产验收。

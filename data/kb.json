@@ -1,6 +1,6 @@
 [
  {"product_id":"BP-S1","fault":"suction_failure","fault_name":"Not sucking / suction loss","error_codes":["E101"],
-  "symptoms":["not sucking","no suction","吸力不够","吸不出来","lost suction"],"cause":"membrane/valve wear or poor flange fit",
+  "symptoms":["not sucking","no suction","吸力不够","吸不出来","不吸","lost suction"],"cause":"membrane/valve wear or poor flange fit",
   "steps":["Clean and re-seat the silicone membrane.","Check duckbill valve for cracks.","Confirm flange size fits.","Switch to a higher suction level."],
   "after_failed":"replacement_eligible_if_warranty_and_authorized"},
  {"product_id":"BP-S1","fault":"leaking","fault_name":"Flange/tubing leaks milk","error_codes":["E105"],
