@@ -352,6 +352,23 @@ def chat():
 
     pr = resolve_product(text, sku)
     
+    # 保护：极短输入（<3字符）或无意义字符，不沿用旧上下文，重置 case
+    clean_text = text.strip().lower()
+    if len(clean_text) < 3 and not re.search(r'ORD-\d{4}', clean_text.upper()):
+        case["product"] = None
+        case["warranty"] = "UNKNOWN"
+        case["dealer"] = "UNKNOWN"
+        case["troubleshooting"] = "NOT_STARTED"
+        return jsonify({
+            "reply": "Hi! 👋 I'm here to help. Could you tell me more about the issue you're having? "
+                     "You can describe the problem, upload a photo, or share your order number (ORD-XXXX).",
+            "cards": [],
+            "trace": {"emotion": emotion, "scope": scope, "product": "—", "order": order_id or "未提供",
+                      "warranty": "—", "dealer": "—", "troubleshooting": "—",
+                      "allowed": ["ask_product", "search_knowledge"], "forbidden": ["propose_replacement", "direct_refund"],
+                      "reasons": ["输入过短，重置上下文，引导用户描述问题"]}
+        })
+    
     # LLM 前置理解：判断是不是新话题/无关问题
     intent = llm_understand_intent(text, case.get("product", {}).get("name") if case.get("product") else None)
     
