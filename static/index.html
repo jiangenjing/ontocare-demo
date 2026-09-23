@@ -182,7 +182,7 @@ async function send(){
 }
 function emoTag(e){const c={"ANGRY":"#DC2626","ANXIOUS":"#D97706","COMPLAINT_RISK":"#7C3AED","NORMAL":"#16A34A"}[e]||"#64748B";return `<span class='emotag' style='background:${c}1A;color:${c}'>${e}</span>`;}
 function render(t){
-  const rows=[["产品",t.product],["订单",t.order],["质保",t.warranty],["经销商",t.dealer],["排障",t.troubleshooting],["图片",t.image]];
+  const rows=[["产品",t.product],["订单",t.order],["质保",t.warranty],["经销商",t.dealer],["排障",t.troubleshooting],["图片",t.image||"无"]];
   let h=`<div class="panel"><div class="pt">感知与证据</div><div class="chips">${emoTag(t.emotion)}</div>
          <div class="grid2" style="margin-top:7px">${rows.map(r=>`<div class="kv"><span>${r[0]}</span><b>${r[1]}</b></div>`).join("")}</div></div>`;
   // 执行记录（工具审计）：每次查订单/经销商/知识的输入输出
