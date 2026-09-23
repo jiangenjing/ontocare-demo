@@ -334,10 +334,11 @@ def chat():
         # 用户没提新产品词，沿用之前的产品（比如"还是不行"）
         pass
     else:
-        # unknown_product：用户提到了产品但不认识 → 清空之前的产品上下文
+        # unknown_product 或 ambiguous_S1Pro：产品不确定
         case["product"] = None
-        case["product_state"] = "UNKNOWN"
-        case["product_unknown"] = True
+        case["product_state"] = pr["state"]
+        # 只有明确不认识的产品才标记为 unknown
+        case["product_unknown"] = (pr["evidence"] == "unknown_product")
 
     fault = match_fault(case["product"]["id"], text) if case["product"] else None
     if "replace" in text.lower() or "换货" in text:
@@ -402,9 +403,10 @@ def nss_card():
 def build_reply(case, emotion, order_id, order, fault, allowed, forbidden):
     cards = []
     if not case["product"]:
-        # 检查是用户没提产品，还是提了不认识的
+        # 检查是用户没提产品，还是提了不认识的，还是同名歧义
         product_state = case.get("product_state", "UNKNOWN")
-        if product_state == "UNKNOWN" and case.get("product_unknown"):
+        product_unknown = case.get("product_unknown", False)
+        if product_unknown:
             return (tone(emotion) + "Sorry about that — we don't carry that product. "
                     "Anker sells chargers, power banks, earbuds, robot vacuums, breast pumps and smart home devices. "
                     "Could you tell me which Anker product you need help with?", cards)
