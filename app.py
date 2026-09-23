@@ -139,9 +139,10 @@ def llm_perceive(text: str, current_product_name: str | None) -> dict:
 You ONLY perceive and understand the user's message; you do NOT make business decisions.
 
 Given the user's message and the current product in conversation, return JSON with these fields:
-- "is_greeting": true if this is just a greeting (hi, hello, hey, 你好, etc.)
+- "is_greeting": true ONLY if the message contains a greeting and NOTHING else (no problem, no request). If a greeting is followed by ANY issue or request, set it to false.
 - "is_new_topic": true if the user starts a DIFFERENT product/issue, or a completely unrelated question
 - "is_irrelevant": true if the message has NOTHING to do with Anker electronics (e.g. paper box, clothes, weather, random gibberish)
+- "logistics_damage": true if the customer's PACKAGE/parcel/box/outer packaging arrived damaged, crushed, torn or wet in shipping (a transit problem, NOT a product malfunction). e.g. "快递破了", "box arrived crushed"
 - "product_hint": one of "breast_pump", "robot_vacuum", "power_bank", "earbuds", "camera", "speaker", "other", or null if unclear
 - "emotion": one of "normal", "anxious" (urgent, in a hurry, event soon), "angry" (furious, terrible, awful, !!!), "complaint_risk" (will complain, lawyer, BBB, ridiculous)
 - "confidence": 0.0-1.0 for your product/emotion judgment
@@ -157,6 +158,7 @@ Reply with ONLY valid JSON, no markdown, no extra text."""
     user = f"Current product in conversation: {current_product_name or 'none'}\nUser message: {text}"
     out = call_llm(sys, user, timeout=12)
     default = {"is_greeting": False, "is_new_topic": False, "is_irrelevant": False,
+               "logistics_damage": False,
                "product_hint": None, "emotion": None, "confidence": 0.0, "reasoning": "LLM unavailable"}
     if not out:
         return default
@@ -189,6 +191,22 @@ def detect_scope(text: str) -> str:
     if re.search(r"speak to (a )?(human|manager|real person|agent)|talk to (a )?(manager|human)|supervisor|real person|agent please", t):
         return "OUT_OF_SCOPE_HUMAN"
     return "IN_SCOPE"
+
+# ---------- 物流 / 外包装损坏（独立于产品故障：走破损登记 / 补发 / 索赔） ----------
+LOGISTICS_ZH = ["快递", "包裹", "外包装", "包装", "纸箱", "外箱", "面单", "封箱", "运输"]
+DAMAGE_ZH    = ["破", "损", "坏", "碎", "扁", "塌", "压", "裂", "湿", "漏"]
+def detect_logistics_damage(text: str) -> bool:
+    """识别"收到的包裹/外包装在运输中破损"。这是物流问题，不应直接定位成某产品故障。"""
+    t = text.lower()
+    # 中文：物流词 + 破损词
+    if any(w in t for w in LOGISTICS_ZH) and any(b in t for b in DAMAGE_ZH):
+        return True
+    # 英文：package/parcel/box/transit/delivery + damaged/crushed/torn/broken
+    if re.search(r"packag|parcel|shipping box|\bbox\b|in transit|delivery|courier|envelope", t) and \
+       re.search(r"damag|crush|torn|broken|dented|destroyed|ripped|wet|leak", t):
+        return True
+    return False
+
 
 PROMOTER_WORDS = ["pump", "flange", "breast", "duckbill", "membrane", "nipple",
                   "suck", "sucks", "sucking", "suction", "milk", "leak", "漏奶", "吸奶"]
@@ -263,8 +281,10 @@ def match_dealer(country: str | None, seller: str | None):
     return {"status": "NO_MATCH"}
 
 # ---------- 3. Decision Ontology：状态 → 合法动作空间（核心） ----------
-def allowed_actions(case: dict):
-    """返回 (allowed[], forbidden[])。规则全部确定性，LLM 只能在 allowed 里选。"""
+def allowed_actions(case: dict, asked_refund: bool = False, asked_replacement: bool = False):
+    """返回 (allowed[], forbidden[], reasons[])。规则全部确定性，LLM 只能在 allowed 里选。
+    asked_* 用于"理由降噪"：用户没提退款/换货时，动作仍在 forbidden 兜底，但不显示
+    相关 CRITICAL/HIGH 理由，避免右栏出现与当前诉求无关的噪音。"""
     allowed, forbidden, reasons = [], [], []
     prod = case.get("product")
     warranty = case.get("warranty", "UNKNOWN")
@@ -296,21 +316,26 @@ def allowed_actions(case: dict):
     can_replace = (ts == "FAILED" and dealer == "AUTHORIZED")
     if can_replace:
         allowed += ["propose_repair", "propose_replacement"]
-        reasons.append("排障失败 + 在保 + 授权经销商：进入换货建议（HIGH，需人工审批）")
+        reasons.append("排障失败 + 在保 + 授权经销商：可进入换货建议（HIGH，需人工审批）")
     else:
-        forbidden += ["propose_replacement"]
-        if ts != "FAILED":
-            reasons.append("排障尚未失败：先引导排障，禁止提前承诺换货")
+        forbidden += ["propose_replacement"]  # 安全兜底（无论用户是否提及）
+        if asked_replacement and dealer != "NOT_AUTHORIZED":
+            if ts != "FAILED":
+                reasons.append("您申请换货：需先完成排障且失败，当前先引导排障")
+            else:
+                reasons.append("暂不满足换货条件，已转人工核验")
     if dealer == "NOT_AUTHORIZED":
         forbidden += ["propose_replacement", "direct_refund"]
         allowed += ["guide_contact_seller"]
         reasons.append("非授权经销商：引导联系购买渠道，不进入官方保修")
     elif case.get("within_30d"):
         allowed += ["direct_refund"]
-        reasons.append("下单30天内 + 授权：命中30天无理由，退款可走(MEDIUM，留痕)")
+        reasons.append("下单30天内 + 授权：命中30天无理由，退款可走（MEDIUM，留痕）")
     else:
-        forbidden += ["direct_refund"]
-        reasons.append("直接退款(CRITICAL)默认禁止，除非人工裁决")
+        forbidden += ["direct_refund"]  # 安全兜底
+        if asked_refund:
+            reasons.append("您申请退款：不满足30天/授权条件，直接退款需人工裁决")
+        # 用户没提退款 → 不显示该理由（右栏降噪）
     allowed = list(dict.fromkeys(allowed)); forbidden = list(dict.fromkeys(forbidden))
     return allowed, forbidden, reasons
 
@@ -406,6 +431,12 @@ def chat():
     greetings = ["hi", "hello", "hey", "hii", "hiya", "你好", "哈喽", "嗨", "早上好", "下午好", "晚上好", "在吗"]
     is_greeting = perception.get("is_greeting") or (
         text.lower() in greetings or (len(text) <= 6 and any(g in text.lower() for g in greetings)))
+    # 兜底：问候后若带实质诉求（破损/故障/退款等），不算纯问候，必须进入业务流程
+    has_substance = bool(re.search(
+        r"破|损|坏|碎|裂|漏|退|换|修|refund|replace|repair|broken|damag|crush|torn|not work|doesn't|charge|"
+        r"leak|offline|issue|problem|fault|error|stop|dead", text.lower()))
+    if has_substance:
+        is_greeting = False
 
     # 极短/乱码输入（<3字符且非订单号、非问候）：重置，引导描述
     clean = text.lower()
@@ -466,6 +497,43 @@ def chat():
         case["troubleshooting"] = "NOT_STARTED"
         case["product_state"] = None
 
+    # ===== 物流 / 外包装损坏：独立流程（破损登记 + 补发/索赔），不定位产品 =====
+    logistics_damage = bool(perception.get("logistics_damage")) or detect_logistics_damage(text)
+    if logistics_damage:
+        case["product"] = None
+        case["troubleshooting"] = "NOT_STARTED"
+        case["warranty"] = "UNKNOWN"
+        cards = []
+        if order_id:
+            od = lookup_order(order_id)
+            trace_tool(case, "lookup_order", {"order_id": order_id}, od["status"])
+            if od["status"] == "FOUND":
+                cards = [{"title": "Logistics damage reported", "body":
+                          f"Order {order_id}: outer packaging arrived damaged.\n"
+                          "→ Shipping-damage claim logged; arranging inspection & reshipment.\n"
+                          "Please upload photos of the outer box + shipping label."}, nss_card()]
+                reply = (f"I'm sorry your order {order_id} arrived with damaged packaging. I've logged a "
+                         "shipping-damage claim and we'll inspect it and arrange a reshipment. Please upload "
+                         "photos of the outer box and the shipping label to speed this up.")
+                allowed = ["report_logistics_damage", "arrange_reshipment", "request_photos", "escalate_human"]
+                forbidden = ["direct_refund"]
+                reasons = [f"物流破损：订单 {order_id} 已登记，安排核查与补发/索赔（需外包装+面单照片）"]
+            else:
+                reply = ("I'm sorry about the damaged package. I couldn't find that order yet — could you "
+                         "confirm your order number and upload photos of the outer box and shipping label?")
+                allowed = ["ask_order", "request_photos", "report_logistics_damage"]
+                forbidden = ["direct_refund", "propose_replacement"]
+                reasons = ["物流破损但订单未核实：先确认订单号与外包装/面单照片"]
+        else:
+            reply = ("I'm really sorry your package arrived damaged. To open a shipping-damage claim, could you "
+                     "share your order number and upload a photo of the outer box (and the shipping label)? I'll take it from there.")
+            allowed = ["ask_order", "request_photos", "report_logistics_damage"]
+            forbidden = ["direct_refund", "propose_replacement"]
+            reasons = ["物流破损：先收集订单号 + 外包装/面单照片，再登记补发/索赔"]
+        trace = _trace_view(emotion, scope, case, order_id, allowed, forbidden, reasons, None)
+        SESSIONS[sid] = case
+        return jsonify({"reply": reply, "cards": cards, "trace": trace})
+
     # ===== L2 数据流：订单 / 经销商（确定性查询，留痕）=====
     order = lookup_order(order_id) if order_id else {"status": "NOT_FOUND", "warranty": "UNKNOWN"}
     if order_id:
@@ -522,7 +590,10 @@ def chat():
         case["troubleshooting"] = "FAILED"  # demo：用户主动要求换货视作排障失败
 
     # ===== L4 决策：Decision Ontology 计算合法动作空间 =====
-    allowed, forbidden, reasons = allowed_actions(case)
+    low = text.lower()
+    asked_refund = bool(re.search(r"refund|money back|退款|退钱", low))
+    asked_replacement = bool(re.search(r"replace|replacement|exchange|换货|换新", low))
+    allowed, forbidden, reasons = allowed_actions(case, asked_refund, asked_replacement)
 
     # 1) 确定性后端先给结构化卡片 + 模板兜底
     reply, cards = build_reply(case, emotion, order_id, order, fault, allowed, forbidden)
