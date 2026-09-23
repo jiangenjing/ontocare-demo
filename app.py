@@ -161,6 +161,10 @@ def resolve_product(text: str, order_sku: str | None) -> dict:
         for p in PRODUCTS:
             if any(a in t for a in p["aliases"]):
                 return {"product": p, "evidence": "alias_match", "state": "PROBABLE"}
+        # 检查用户是否提到了产品/购买相关词
+        product_words = ["buy", "bought", "product", "item", "order", "买", "箱", "机器", "device", "gadget", "charger", "battery", "vacuum", "pump", "earbud", "speaker", "replacement", "refund", "换货", "退款"]
+        if any(w in t for w in product_words):
+            return {"product": None, "evidence": "unknown_product", "state": "UNKNOWN"}
         return {"product": None, "evidence": "no_product_mentioned", "state": "UNKNOWN"}
 
     # 订单 SKU 是最强证据
@@ -324,6 +328,16 @@ def chat():
     pr = resolve_product(text, sku)
     if pr["product"]:
         case["product"] = pr["product"]
+        case["product_state"] = pr["state"]
+        case["product_unknown"] = False
+    elif pr["evidence"] == "no_product_mentioned":
+        # 用户没提新产品词，沿用之前的产品（比如"还是不行"）
+        pass
+    else:
+        # unknown_product：用户提到了产品但不认识 → 清空之前的产品上下文
+        case["product"] = None
+        case["product_state"] = "UNKNOWN"
+        case["product_unknown"] = True
 
     fault = match_fault(case["product"]["id"], text) if case["product"] else None
     if "replace" in text.lower() or "换货" in text:
@@ -388,6 +402,12 @@ def nss_card():
 def build_reply(case, emotion, order_id, order, fault, allowed, forbidden):
     cards = []
     if not case["product"]:
+        # 检查是用户没提产品，还是提了不认识的
+        product_state = case.get("product_state", "UNKNOWN")
+        if product_state == "UNKNOWN" and case.get("product_unknown"):
+            return (tone(emotion) + "Sorry about that — we don't carry that product. "
+                    "Anker sells chargers, power banks, earbuds, robot vacuums, breast pumps and smart home devices. "
+                    "Could you tell me which Anker product you need help with?", cards)
         return (tone(emotion) + "I want to make sure I help with the right product — which one is it? "
                 "For example the eufy breast pump S1 Pro or the robot vacuum S1 Pro?", cards)
     p = case["product"]
