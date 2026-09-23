@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OntoCare — Anker 本体驱动售后 Agent</title>
+<style>
+  :root{
+    --ank:#0A6CFF; --ank-d:#0B2A6B; --ank-l:#E8F1FF;
+    --ok:#16A34A; --ok-bg:#DCFCE7; --bad:#DC2626; --bad-bg:#FEE2E2;
+    --warn:#D97706; --warn-bg:#FEF3C7; --line:#E5EAF2; --bg:#F4F7FC; --ink:#1B2A4A;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;}
+  body{background:var(--bg);height:100vh;display:flex;flex-direction:column;color:var(--ink);}
+  .topbar{background:linear-gradient(120deg,var(--ank) 0%,var(--ank-d) 100%);color:#fff;padding:12px 22px;display:flex;align-items:center;gap:12px;}
+  .logo{width:34px;height:34px;border-radius:9px;background:#fff;color:var(--ank-d);font-weight:800;display:flex;align-items:center;justify-content:center;font-size:13px;}
+  .topbar .t{line-height:1.2;} .topbar .t b{font-size:15px;display:block;} .topbar .t span{font-size:11px;opacity:.85;}
+  .badge{margin-left:auto;font-size:10.5px;background:rgba(255,255,255,.16);padding:4px 10px;border-radius:20px;}
+  .lang{display:flex;background:rgba(255,255,255,.16);border-radius:20px;overflow:hidden;}
+  .lang button{background:transparent;border:0;color:#fff;font-size:11px;padding:4px 12px;cursor:pointer;opacity:.7;}
+  .lang button.on{background:#fff;color:var(--ank-d);opacity:1;font-weight:700;}
+  .main{flex:1;display:flex;gap:14px;padding:14px;overflow:hidden;}
+  .chat{width:430px;background:#fff;border-radius:16px;box-shadow:0 4px 18px rgba(11,42,107,.08);display:flex;flex-direction:column;}
+  .chat-head{padding:13px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px;font-size:13px;font-weight:600;}
+  .chat-head .on{width:8px;height:8px;border-radius:50%;background:var(--ok);}
+  .log{flex:1;padding:14px;overflow-y:auto;display:flex;flex-direction:column;gap:9px;}
+  .msg{max-width:92%;padding:9px 13px;border-radius:13px;font-size:13px;line-height:1.55;white-space:pre-wrap;}
+  .user{align-self:flex-end;background:var(--ank-d);color:#fff;border-bottom-right-radius:4px;}
+  .bot{align-self:flex-start;background:var(--ank-l);border-bottom-left-radius:4px;}
+  .card{align-self:flex-start;background:#fff;border:1.5px solid var(--ank);border-radius:10px;padding:9px 12px;font-size:12px;line-height:1.55;max-width:92%;}
+  .card b{color:var(--ank-d);} .card .body{color:#333;margin-top:4px;white-space:pre-wrap;}
+  .shot{align-self:flex-end;max-width:56%;border-radius:10px;border:2px solid var(--ank);}
+  .vlm{align-self:flex-start;background:#FFF7ED;border:1.5px solid var(--warn);border-radius:10px;padding:8px 11px;font-size:11.5px;max-width:92%;color:#92400E;}
+  .vlm b{color:var(--warn);}
+  .composer{padding:11px 13px;border-top:1px solid var(--line);}
+  .scenes{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:9px;}
+  .scene{font-size:10.5px;padding:6px 5px;border:1px solid var(--ank);color:var(--ank-d);background:#fff;border-radius:8px;cursor:pointer;text-align:center;line-height:1.3;}
+  .scene:hover{background:var(--ank-l);}
+  .row{display:flex;gap:8px;}
+  .row input[type=text]{flex:1;padding:10px 12px;border:1.5px solid var(--line);border-radius:10px;font-size:13px;outline:none;}
+  .row input:focus{border-color:var(--ank);}
+  .icon-btn{width:42px;border:1.5px solid var(--line);background:#fff;border-radius:10px;cursor:pointer;font-size:16px;}
+  .send{width:64px;background:var(--ank);color:#fff;border:0;border-radius:10px;font-weight:700;cursor:pointer;}
+  .trace{flex:1;background:#fff;border-radius:16px;box-shadow:0 4px 18px rgba(11,42,107,.08);padding:16px;overflow-y:auto;}
+  .trace h3{font-size:13px;color:var(--ank-d);margin-bottom:10px;letter-spacing:.3px;}
+  .panel{border:1px solid var(--line);border-radius:11px;padding:10px 12px;margin-bottom:10px;}
+  .panel .pt{font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;}
+  .kv{font-size:12px;display:flex;justify-content:space-between;padding:3px 0;}
+  .kv span{color:#8896AC;font-size:11px;} .kv b{color:var(--ink);}
+  .chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px;}
+  .chip{font-size:11px;padding:3px 9px;border-radius:7px;font-weight:600;}
+  .chip.ok{background:var(--ok-bg);color:var(--ok);} .chip.bad{background:var(--bad-bg);color:var(--bad);}
+  .chip.warn{background:var(--warn-bg);color:var(--warn);} .chip.info{background:var(--ank-l);color:var(--ank-d);}
+  .reason{font-size:11.5px;line-height:1.6;margin-top:4px;}
+  .reason div{background:var(--ank-l);border-left:3px solid var(--ank);padding:5px 9px;border-radius:0 7px 7px 0;margin:4px 0;color:#334155;}
+  .emotag{display:inline-block;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:700;}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="logo">OC</div>
+    <div class="t"><b>OntoCare</b><span id="subtitle">服务本体 + 决策本体 · 安克 L3 售后 Agent</span></div>
+    <div class="badge">DEMO · LLM=gpt-5.6 · VLM=qwen3-vl · 规则硬约束</div>
+    <div class="lang">
+      <button id="btnZh" class="on" onclick="setLang('zh')">中文</button>
+      <button id="btnEn" onclick="setLang('en')">EN</button>
+    </div>
+  </div>
+  <div class="main">
+    <div class="chat">
+      <div class="chat-head"><span class="on"></span> <span id="chatHead">智能客服（Agent）</span></div>
+      <div class="log" id="log">
+        <div class="msg bot" id="welcome"></div>
+      </div>
+      <div class="composer">
+        <div class="scenes" style="grid-template-columns:1fr 1fr 1fr;">
+          <div class="scene" onclick="setv('My S1 Pro is not sucking, order ORD-2001')"><span data-i18n="s1">① S1 Pro 消歧</span></div>
+          <div class="scene" onclick="setv('Order ORD-9999 is broken, I want a replacement')"><span data-i18n="s2">② 订单查无</span></div>
+          <div class="scene" onclick="setv('ORD-2002, robot won\'t charge, send refund now!!!')"><span data-i18n="s3">③ 暴怒要退款</span></div>
+          <div class="scene" onclick="setv('ORD-2016 power bank dead, refund it')"><span data-i18n="s4">④ 30天内退款</span></div>
+          <div class="scene" onclick="setv('ORD-2005 still won\'t charge, send replacement!')"><span data-i18n="s5">⑤ 换货工单</span></div>
+          <div class="scene" style="background:var(--ank);color:#fff" onclick="demoShow()"><span data-i18n="demo">★ 现场剧本</span></div>
+        </div>
+        <div class="row">
+          <input id="file" type="file" accept="image/*" style="display:none" onchange="pickimg(this)">
+          <button class="icon-btn" title="上传故障图" onclick="document.getElementById('file').click()">📷</button>
+          <input id="in" placeholder="Type your issue..." onkeydown="if(event.key==='Enter')send()">
+          <button class="send" onclick="send()" data-i18n="send">发送</button>
+        </div>
+      </div>
+    </div>
+    <div class="trace">
+      <h3 id="traceTitle">◈ 决策追踪（实时 · 可审计）</h3>
+      <div id="tr"><i id="traceHint" style="color:#94A3B8;font-size:12px">右侧将随对话显示：情绪 → 证据 → 产品/订单 → 质保/经销商 → 合法动作 / 被禁动作。</i></div>
+    </div>
+  </div>
+<script>
+const sid="demo"; let pendingImg=null; let lang="zh";
+const I18N={
+  zh:{
+    subtitle:"服务本体 + 决策本体 · 安克 L3 售后 Agent",
+    chatHead:"智能客服（Agent）",
+    welcome:"你好，我是安克售后智能助手。告诉我遇到了什么问题——可以拍一张故障照片、报一个订单号（ORD-2001…ORD-2020），或点下方的黄金案例试试。",
+    s1:"① S1 Pro 消歧", s2:"② 订单查无", s3:"③ 暴怒要退款", s4:"④ 30天内退款", s5:"⑤ 换货工单", demo:"★ 现场剧本",
+    send:"发送", ph:"输入你的问题…",
+    traceTitle:"◈ 决策追踪（实时 · 可审计）",
+    traceHint:"右侧将随对话显示：情绪 → 证据 → 产品/订单 → 质保/经销商 → 合法动作 / 被禁动作。",
+    sceneStart:"--- 现场剧本：暴怒用户 → 查质保 → 换货工单 ---",
+    netErr:"⚠️ 网络或后端暂时没响应，请稍等再试一次（通常是 AI 接口这一轮慢了）。"
+  },
+  en:{
+    subtitle:"Service Ontology + Decision Ontology · Anker L3 After-sales Agent",
+    chatHead:"Customer Support (Agent)",
+    welcome:"Hi, I'm your Anker support agent. Tell me what's wrong — attach a fault photo, mention an order (ORD-2001…ORD-2020), or try a golden case below.",
+    s1:"① S1 Pro disambig", s2:"② Order not found", s3:"③ Furious refund", s4:"④ 30-day refund", s5:"⑤ Replacement", demo:"★ Live demo",
+    send:"Send", ph:"Type your issue...",
+    traceTitle:"◈ Decision Trace (real-time · auditable)",
+    traceHint:"The right panel shows: emotion → evidence → product/order → warranty/dealer → allowed / forbidden actions.",
+    sceneStart:"--- Live script: furious user → warranty check → replacement ticket ---",
+    netErr:"⚠️ Network or backend didn't respond, please retry (usually the AI call is slow)."
+  }
+};
+function setLang(l){
+  lang=l;
+  const t=I18N[l];
+  document.getElementById("subtitle").textContent=t.subtitle;
+  document.getElementById("chatHead").textContent=t.chatHead;
+  document.getElementById("welcome").textContent=t.welcome;
+  document.getElementById("in").placeholder=t.ph;
+  document.getElementById("traceTitle").textContent=t.traceTitle;
+  document.getElementById("traceHint").textContent=t.traceHint;
+  document.querySelectorAll("[data-i18n]").forEach(el=>{el.textContent=t[el.dataset.i18n];});
+  document.getElementById("btnZh").classList.toggle("on",l==="zh");
+  document.getElementById("btnEn").classList.toggle("on",l==="en");
+}
+function add(cls,txt){const l=document.getElementById("log");const d=document.createElement("div");d.className="msg "+cls;d.textContent=txt;l.appendChild(d);l.scrollTop=l.scrollHeight;}
+function card(t,b){const l=document.getElementById("log");const d=document.createElement("div");d.className="card";d.innerHTML="<b>"+t+"</b><div class='body'>"+b.replace(/\n/g,"<br>")+"</div>";l.appendChild(d);l.scrollTop=l.scrollHeight;}
+async function pickimg(i){
+  const f=i.files[0]; if(!f)return;
+  const l=document.getElementById("log");
+  const sh=document.createElement("img"); sh.className="shot"; sh.src=URL.createObjectURL(f); l.appendChild(sh); l.scrollTop=l.scrollHeight;
+  const fd=new FormData(); fd.append("image",f);
+  try{
+    const r=await fetch("/api/upload",{method:"POST",body:fd});const j=await r.json();pendingImg=j.filename;
+    if(j.vlm){card("📷 VLM 读图",`型号:${j.vlm.product_model||'?'}｜错误码:${j.vlm.error_code||'?'}｜现象:${j.vlm.visible_issue||'?'}｜置信度:${j.vlm.confidence||'?'}`);}
+  }catch(e){pendingImg=f.name;}
+}
+function setv(v){document.getElementById("in").value=v;send();}
+async function demoShow(){
+  add("user",I18N[lang].sceneStart);
+  await sendText("I am FURIOUS! robot died, my party is tomorrow, fix it NOW!");
+  await sleep(900);
+  await sendText("my order is ORD-2005");
+  await sleep(900);
+  await sendText("I tried everything, still won't charge! send me a replacement!");
+}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function sendText(t){add("user",t);
+  const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({message:t,session_id:"demo"})});
+  const j=await r.json();add("bot",j.reply);(j.cards||[]).forEach(c=>card(c.title,c.body));render(j.trace);}
+async function send(){
+  const i=document.getElementById("in");const t=i.value.trim();if(!t)return;
+  if(t) add("user",t); if(pendingImg){add("user","[图片] "+pendingImg);}
+  i.value="";const img=pendingImg;pendingImg=null;
+  try{
+    const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({message:t,image:img?("uploaded:"+img):null,session_id:sid})});
+    const j=await r.json();
+    add("bot",j.reply);
+    (j.cards||[]).forEach(c=>card(c.title,c.body));
+    render(j.trace);
+  }catch(e){
+    add("bot",I18N[lang].netErr);
+  }
+}
+function emoTag(e){const c={"ANGRY":"#DC2626","ANXIOUS":"#D97706","COMPLAINT_RISK":"#7C3AED","NORMAL":"#16A34A"}[e]||"#64748B";return `<span class='emotag' style='background:${c}1A;color:${c}'>${e}</span>`;}
+function render(t){
+  const rows=[["产品",t.product],["订单",t.order],["质保",t.warranty],["经销商",t.dealer],["排障",t.troubleshooting],["图片",t.image]];
+  let h=`<div class="panel"><div class="pt">感知与证据</div><div class="chips">${emoTag(t.emotion)}</div>
+         <div class="grid2" style="margin-top:7px">${rows.map(r=>`<div class="kv"><span>${r[0]}</span><b>${r[1]}</b></div>`).join("")}</div></div>`;
+  h+=`<div class="panel"><div class="pt">允许动作 (Allowed)</div><div class="chips">${t.allowed.map(a=>`<span class="chip ok">${a}</span>`).join("")||"<span style='font-size:11px;color:#999'>—</span>"}</div></div>`;
+  h+=`<div class="panel"><div class="pt">被禁动作 (Forbidden)</div><div class="chips">${(t.forbidden||[]).map(a=>`<span class="chip bad">${a}</span>`).join("")||"<span style='font-size:11px;color:#999'>无</span>"}</div></div>`;
+  h+=`<div class="panel"><div class="pt">决策理由 (Why)</div><div class="reason">${t.reasons.map(r=>"<div>"+r+"</div>").join("")}</div></div>`;
+  document.getElementById("tr").innerHTML=h;
+}
+setLang("zh");
+</script>
+</body>
+</html>
