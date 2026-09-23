@@ -346,6 +346,19 @@ def chat():
 
     allowed, forbidden, reasons = allowed_actions(case)
 
+    # 短问候语：先友好回应，再引导说问题
+    greetings = ["hi", "hello", "hey", "hii", "hiya", "你好", "哈喽", "嗨", "早上好", "下午好", "晚上好", "在吗"]
+    if text.strip().lower() in greetings or (len(text.strip()) <= 6 and any(g in text.lower() for g in greetings)):
+        return jsonify({
+            "reply": "Hi there! 👋 I'm OntoCare, Anker's after-sales assistant. What seems to be the problem? "
+                     "You can tell me the product issue, upload a photo of the error, or share your order number (ORD-XXXX).",
+            "cards": [],
+            "trace": {"emotion": emotion, "scope": scope, "product": "—", "order": order_id or "未提供",
+                      "warranty": "—", "dealer": "—", "troubleshooting": "—",
+                      "allowed": ["ask_product", "search_knowledge"], "forbidden": ["propose_replacement", "direct_refund"],
+                      "reasons": ["用户问候，先友好回应，引导描述问题"]}
+        })
+
     # 1) 确定性后端先给出结构化卡片 + 模板兜底
     reply, cards = build_reply(case, emotion, order_id, order, fault, allowed, forbidden)
     # 2) 再让 LLM 在【合法动作】内把话术写自然；失败则用模板
