@@ -40,6 +40,17 @@ CASES = [
  ("18 德国经销商模糊匹配",      "robot vacuum problem",     "ORD-2002", {"dealer":"AUTHORIZED"}),
  ("19 产品未确定禁办理",        "it doesn't work",          "ORD-9999", {"forbidden":["propose_replacement","direct_refund"]}),
  ("20 非授权+在保禁换货",       "replace it please",        "ORD-2014", {"forbidden":["propose_replacement"],"dealer":"NOT_AUTHORIZED"}),
+ # ── 边缘 / 鲁棒性补充 ──
+ ("21 在保但未排障→禁提前换货", "replace it please",        "ORD-2005", {"forbidden":["propose_replacement"]}, "NOT_STARTED"),
+ ("22 排障失败但过保→禁换货",    "replace it please",        "ORD-2003", {"forbidden":["propose_replacement"]}, "FAILED"),
+ ("23 无订单vacuum alias识别",  "my vacuum is loud",        None, {"product":"RV-S1"}),
+ ("24 无订单pump alias识别",    "my pump leaks",            None, {"product":"BP-S1"}),
+ ("25 充电宝charger识别",       "charger won't charge",     None, {"product":"PB-20K"}),
+ ("26 摄像头识别",              "security camera offline",  None, {"product":"CAM-S220"}),
+ ("27 打错字robot vaccines诚实", "robot vaccines broken",    None, {"product":None}),
+ ("28 无关paper box不瞎猜",     "I bought a paper box",     None, {"product":None}),
+ ("29 纯描述含糊产品None",      "it doesn't work at all",   None, {"product":None}),
+ ("30 排障失败+非授权→引导卖家", "replace it please",        "ORD-2014", {"allowed":["guide_contact_seller"]}, "FAILED"),
 ]
 
 def check(actual, expect):

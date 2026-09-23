@@ -12,9 +12,9 @@ import urllib.request
 from flask import Flask, request, jsonify, send_from_directory
 
 # ---------- LLM 适配层（OpenAI 兼容；key 从环境变量读，不写死） ----------
-LLM_BASE = os.getenv("LLM_BASE_URL", "https://apiany.org/v1")
+LLM_BASE = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
 LLM_KEY  = os.getenv("LLM_API_KEY", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5.6")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 
 def call_llm(system: str, user: str, timeout: int = 15) -> str | None:
     """调 OpenAI 兼容接口；失败/无 key 返回 None（上层回退模板）。"""
@@ -125,31 +125,51 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 # 内存会话：MVP 用 dict，生产换 DynamoDB / Redis
 SESSIONS = {}
 
-# ---------- 1. 感知层：情绪 / 实体 / 意图（mock；接 LLM 后替换这部分） ----------
-def llm_understand_intent(text: str, current_product: str | None) -> dict:
-    """LLM 前置理解：判断用户这句话是在延续旧问题，还是在说一个新问题。
-    返回 {is_new_topic: bool, mentioned_product: str|None, is_irrelevant: bool}"""
-    sys = """You are an intent understanding module for Anker after-sales support.
-Given the user's message and the current product in the conversation, decide:
-1. Is the user starting a NEW topic (different product, completely unrelated question, or greeting)?
-2. If they mentioned a product, what is it? (e.g. breast pump, robot vacuum, power bank, earbuds)
-3. Is this message completely unrelated to Anker electronics (e.g. asking about a paper box, shipping, etc.)?
+# ---------- 1. 感知层：LLM 统一理解（产品/情绪/新话题/问候/无关） ----------
+def llm_perceive(text: str, current_product_name: str | None) -> dict:
+    """LLM 前置感知：用户每说一句话，先让 LLM 判断 5 件事，输出结构化 JSON。
+    LLM 只做"感知"，不做"决策"——决策还是规则引擎做。
+    返回 {
+      is_greeting, is_new_topic, is_irrelevant,
+      product_hint: breast_pump/robot_vacuum/power_bank/earbuds/camera/other/null,
+      emotion: normal/anxious/angry/complaint_risk,
+      confidence, reasoning
+    }"""
+    sys = """You are the PERCEPTION module for Anker OntoCare after-sales agent.
+You ONLY perceive and understand the user's message; you do NOT make business decisions.
 
-Reply in JSON only:
-{"is_new_topic": true/false, "mentioned_product": "product name or null", "is_irrelevant": true/false}"""
-    user = f"Current product in conversation: {current_product or 'none'}\nUser message: {text}"
-    out = call_llm(sys, user, timeout=8)
+Given the user's message and the current product in conversation, return JSON with these fields:
+- "is_greeting": true if this is just a greeting (hi, hello, hey, 你好, etc.)
+- "is_new_topic": true if the user starts a DIFFERENT product/issue, or a completely unrelated question
+- "is_irrelevant": true if the message has NOTHING to do with Anker electronics (e.g. paper box, clothes, weather, random gibberish)
+- "product_hint": one of "breast_pump", "robot_vacuum", "power_bank", "earbuds", "camera", "speaker", "other", or null if unclear
+- "emotion": one of "normal", "anxious" (urgent, in a hurry, event soon), "angry" (furious, terrible, awful, !!!), "complaint_risk" (will complain, lawyer, BBB, ridiculous)
+- "confidence": 0.0-1.0 for your product/emotion judgment
+- "reasoning": one short sentence
+
+Important disambiguation for "S1 Pro":
+- Words like "sucking", "suction problem on pump", "breast", "flange", "milk" → breast_pump
+- Words like "robot", "vacuum", "roller brush", "dock", "won't navigate" → robot_vacuum
+- "not sucking" with S1 Pro → breast_pump (a breast pump sucks milk)
+- "robot died" → robot_vacuum
+
+Reply with ONLY valid JSON, no markdown, no extra text."""
+    user = f"Current product in conversation: {current_product_name or 'none'}\nUser message: {text}"
+    out = call_llm(sys, user, timeout=12)
+    default = {"is_greeting": False, "is_new_topic": False, "is_irrelevant": False,
+               "product_hint": None, "emotion": None, "confidence": 0.0, "reasoning": "LLM unavailable"}
     if not out:
-        # LLM 不可用：保守返回，不重置
-        return {"is_new_topic": False, "mentioned_product": None, "is_irrelevant": False}
+        return default
     try:
-        # 提取 JSON
-        m = re.search(r'\{[^}]*\}', out, re.DOTALL)
-        if m:
-            return json.loads(m.group(0))
-    except:
-        pass
-    return {"is_new_topic": False, "mentioned_product": None, "is_irrelevant": False}
+        s, e = out.find("{"), out.rfind("}")
+        if s >= 0 and e > s:
+            data = json.loads(out[s:e+1])
+            for k, v in default.items():
+                data.setdefault(k, v)
+            return data
+    except Exception as ex:
+        print("[perceive JSON parse failed]", ex, out[:100])
+    return default
 
 def detect_emotion(text: str) -> str:
     t = text.lower()
@@ -170,8 +190,10 @@ def detect_scope(text: str) -> str:
         return "OUT_OF_SCOPE_HUMAN"
     return "IN_SCOPE"
 
-PROMOTER_WORDS = ["pump", "flange", "breast", "duckbill", "membrane", "nipple"]
-ROBOT_WORDS    = ["vacuum", "robot", "brush", "dock", "docking", "charging", "charge", "扫地", "吸尘", "滚刷"]
+PROMOTER_WORDS = ["pump", "flange", "breast", "duckbill", "membrane", "nipple",
+                  "suck", "sucks", "sucking", "suction", "milk", "leak", "漏奶", "吸奶"]
+ROBOT_WORDS    = ["vacuum", "robot", "brush", "dock", "docking", "navigate", "扫地", "吸尘", "滚刷",
+                  "robot vacuum", "mop", "sweep"]
 
 def resolve_product(text: str, order_sku: str | None) -> dict:
     """本体消歧：同名 S1 Pro → 吸奶器 or 扫地机。订单 SKU 是最强证据，直接定位。"""
@@ -271,9 +293,14 @@ def allowed_actions(case: dict):
         return list(dict.fromkeys(allowed)), forbidden, reasons
 
     # warranty == VALID
-    if ts == "FAILED" and dealer == "AUTHORIZED":
+    can_replace = (ts == "FAILED" and dealer == "AUTHORIZED")
+    if can_replace:
         allowed += ["propose_repair", "propose_replacement"]
         reasons.append("排障失败 + 在保 + 授权经销商：进入换货建议（HIGH，需人工审批）")
+    else:
+        forbidden += ["propose_replacement"]
+        if ts != "FAILED":
+            reasons.append("排障尚未失败：先引导排障，禁止提前承诺换货")
     if dealer == "NOT_AUTHORIZED":
         forbidden += ["propose_replacement", "direct_refund"]
         allowed += ["guide_contact_seller"]
@@ -309,16 +336,51 @@ def upload():
     return jsonify({"ok": True, "filename": fn, "vlm": vlm,
                     "note": "VLM enabled" if vlm else "VLM not configured, text-only fallback"})
 
+def fresh_case() -> dict:
+    """全新的本体 Case State（新话题/无关问题时重置）。"""
+    return {"product": None, "evidence": [], "warranty": "UNKNOWN",
+            "dealer": "UNKNOWN", "troubleshooting": "NOT_STARTED",
+            "tool_trace": [], "llm_fail_count": 0}
+
+def trace_tool(case: dict, action: str, inputs: dict, result: str):
+    """记录一次工具/查询调用（可审计）：动作名 + 输入 + 结果。"""
+    case.setdefault("tool_trace", []).append({
+        "action": action,
+        "input": {k: str(v)[:60] for k, v in inputs.items() if v},
+        "result": str(result)[:80],
+    })
+
+def _trace_view(emotion, scope, case, order_id, allowed, forbidden, reasons,
+                evidence=None, img_name=None, vlm_ev=None):
+    """构造右栏 Decision Trace 视图（含工具审计）。"""
+    product = case.get("product") if case else None
+    t = {
+        "emotion": emotion,
+        "scope": scope,
+        "product": product["name"] if product else "—",
+        "order": order_id or "未提供",
+        "warranty": case.get("warranty", "—") if case else "—",
+        "dealer": case.get("dealer", "—") if case else "—",
+        "troubleshooting": case.get("troubleshooting", "—") if case else "—",
+        "allowed": allowed, "forbidden": forbidden, "reasons": reasons,
+        "tool_trace": case.get("tool_trace", []) if case else [],
+    }
+    if evidence is not None:
+        t["evidence"] = evidence
+    if img_name or vlm_ev:
+        t["image"] = (f"{img_name} · VLM:{vlm_ev.get('error_code','?')}/{vlm_ev.get('visible_issue','?')}"
+                      if vlm_ev else (img_name or "无"))
+    return t
+
 @app.route("/api/chat", methods=["POST"])
 def chat():
     body = request.get_json(force=True)
-    text = body.get("message", "")
+    text = (body.get("message", "") or "").strip()
     img = body.get("image")  # 形如 "uploaded:fault.jpg"
     img_name = img.split(":", 1)[1] if img else None
     vlm_ev = VISION_CACHE.get(img_name) if img_name else None
     sid = body.get("session_id", "demo")
-    case = SESSIONS.get(sid, {"product": None, "evidence": [], "warranty": "UNKNOWN",
-                              "dealer": "UNKNOWN", "troubleshooting": "NOT_STARTED"})
+    case = SESSIONS.get(sid, fresh_case())
 
     # 从消息里抓订单号；本轮没给则沿用会话里已确认的（多轮记忆）
     m = re.search(r"ORD-\d{4}", text.upper())
@@ -327,115 +389,149 @@ def chat():
         case["order_id"] = order_id
     explicit_oid = bool((m and m.group(0)) or body.get("order_id"))
 
-    emotion = detect_emotion(text)
-    scope = detect_scope(text)
-    if scope != "IN_SCOPE":
-        return jsonify({"reply": "This looks outside what our automated support can handle — I'm connecting you to a human specialist now. No need to repeat your issue, I'll pass the context along.",
-                        "cards": [{"title": "Escalated to human", "body": "Reason: out_of_scope. A specialist will pick this up shortly."}],
-                        "trace": {"emotion": emotion, "scope": scope, "product": "—", "order": order_id or "未提供",
-                                  "warranty": "—", "dealer": "—", "troubleshooting": "—",
-                                  "allowed": ["escalate_human"], "forbidden": [],
-                                  "reasons": ["服务边界命中：超出自助范围，直接转人工（不强行自动处理）"]}})
+    # ===== L1 感知层：LLM 统一理解（产品/情绪/新话题/问候/无关）=====
+    cur_name = case.get("product", {}).get("name") if case.get("product") else None
+    perception = llm_perceive(text, cur_name)
 
+    # 情绪：LLM 判断优先，LLM 失败/不确定再用正则兜底
+    emotion = None
+    if perception.get("emotion") and perception["emotion"] != "normal":
+        emotion = perception["emotion"].upper()
+    if not emotion:
+        emotion = detect_emotion(text)
+
+    scope = detect_scope(text)
+
+    # 问候：LLM 判断优先，再用关键词兜底
+    greetings = ["hi", "hello", "hey", "hii", "hiya", "你好", "哈喽", "嗨", "早上好", "下午好", "晚上好", "在吗"]
+    is_greeting = perception.get("is_greeting") or (
+        text.lower() in greetings or (len(text) <= 6 and any(g in text.lower() for g in greetings)))
+
+    # 极短/乱码输入（<3字符且非订单号、非问候）：重置，引导描述
+    clean = text.lower()
+    if len(clean) < 3 and not is_greeting and not re.search(r'ORD-\d{4}', clean.upper()):
+        case = fresh_case()
+        SESSIONS[sid] = case
+        return jsonify({
+            "reply": "Hi! I'm here to help. Could you tell me a bit more? You can describe the problem, "
+                     "upload a photo of the error, or share your order number (ORD-XXXX).",
+            "cards": [],
+            "trace": _trace_view(emotion, scope, None, order_id,
+                                 ["ask_product", "search_knowledge"],
+                                 ["propose_replacement", "direct_refund"],
+                                 ["输入过短/不完整：重置上下文，引导用户描述问题"], None)})
+
+    # 问候：先友好回应，不进入业务流程
+    if is_greeting:
+        return jsonify({
+            "reply": "Hi there! I'm OntoCare, Anker's after-sales assistant. What seems to be the problem? "
+                     "You can tell me the product issue, upload a photo of the error, or share your order number (ORD-XXXX).",
+            "cards": [],
+            "trace": _trace_view(emotion, scope, None, order_id,
+                                 ["ask_product", "search_knowledge"],
+                                 ["propose_replacement", "direct_refund"],
+                                 ["用户问候：先友好回应，引导描述问题"], None)})
+
+    # 服务边界：企业/媒体/批量等超范围 → 直接转人工
+    if scope != "IN_SCOPE":
+        return jsonify({"reply": "This looks outside what our automated support can handle — I'm connecting you to a human specialist now. "
+                                 "No need to repeat your issue, I'll pass the context along.",
+                        "cards": [{"title": "Escalated to human", "body": "Reason: out of scope. A specialist will pick this up shortly."}],
+                        "trace": _trace_view(emotion, scope, None, order_id,
+                                             ["escalate_human"], [],
+                                             ["服务边界命中：超出自助范围，直接转人工"], None)})
+
+    # ===== 新话题 / 无关问题：重置本体状态（解决"纸箱子串台"）=====
+    is_irrelevant = perception.get("is_irrelevant")
+    is_new_topic = perception.get("is_new_topic")
+    product_hint = perception.get("product_hint")
+
+    # 完全无关（纸箱子/衣服/天气/乱码）：重置，友好说明我们只做 Anker 电子产品
+    if is_irrelevant and product_hint in (None, "other"):
+        case = fresh_case()
+        SESSIONS[sid] = case
+        return jsonify({
+            "reply": "Thanks for reaching out! Just to clarify, I only support Anker electronics such as chargers, "
+                     "power banks, earbuds, robot vacuums and breast pumps — we don't sell other items like that. "
+                     "Which Anker product can I help you with?",
+            "cards": [],
+            "trace": _trace_view(emotion, scope, None, order_id,
+                                 ["ask_product", "search_knowledge"],
+                                 ["propose_replacement", "direct_refund"],
+                                 ["LLM 感知：问题与 Anker 电子产品无关，重置 Case，引导正确产品"], None)})
+
+    # 新话题且提到了（可能的）产品：重置产品与排障，重新走识别
+    if is_new_topic and product_hint and product_hint != "other":
+        case["product"] = None
+        case["troubleshooting"] = "NOT_STARTED"
+        case["product_state"] = None
+
+    # ===== L2 数据流：订单 / 经销商（确定性查询，留痕）=====
     order = lookup_order(order_id) if order_id else {"status": "NOT_FOUND", "warranty": "UNKNOWN"}
+    if order_id:
+        trace_tool(case, "lookup_order", {"order_id": order_id}, order["status"])
     if order["status"] == "FOUND":
         sku = order["order"]["sku"]
         case["warranty"] = order["warranty"]
         d = match_dealer(order["order"]["country"], order["order"]["seller"])
+        trace_tool(case, "verify_dealer",
+                   {"country": order["order"]["country"], "seller": order["order"]["seller"]},
+                   d["status"])
         case["dealer"] = d["status"]
         case["within_30d"] = order.get("within_30d", False)
     else:
         sku = None
-        # 仅当本轮明确报了订单号却查无，才把质保标 UNKNOWN；未报则保留上轮已确认状态
         if explicit_oid:
             case["warranty"] = "UNKNOWN"
 
+    # ===== L3 本体：产品消歧（订单 SKU 最强；LLM 感知 + 关键词兜底）=====
     pr = resolve_product(text, sku)
-    
-    # 保护：极短输入（<3字符）或无意义字符，不沿用旧上下文，重置 case
-    clean_text = text.strip().lower()
-    if len(clean_text) < 3 and not re.search(r'ORD-\d{4}', clean_text.upper()):
-        case["product"] = None
-        case["warranty"] = "UNKNOWN"
-        case["dealer"] = "UNKNOWN"
-        case["troubleshooting"] = "NOT_STARTED"
-        return jsonify({
-            "reply": "Hi! 👋 I'm here to help. Could you tell me more about the issue you're having? "
-                     "You can describe the problem, upload a photo, or share your order number (ORD-XXXX).",
-            "cards": [],
-            "trace": {"emotion": emotion, "scope": scope, "product": "—", "order": order_id or "未提供",
-                      "warranty": "—", "dealer": "—", "troubleshooting": "—",
-                      "allowed": ["ask_product", "search_knowledge"], "forbidden": ["propose_replacement", "direct_refund"],
-                      "reasons": ["输入过短，重置上下文，引导用户描述问题"]}
-        })
-    
-    # LLM 前置理解：判断是不是新话题/无关问题
-    intent = llm_understand_intent(text, case.get("product", {}).get("name") if case.get("product") else None)
-    
-    # 如果是完全无关的问题（比如纸箱子），重置 case 并友好说明
-    if intent.get("is_irrelevant") and not intent.get("mentioned_product"):
-        case["product"] = None
-        case["warranty"] = "UNKNOWN"
-        case["dealer"] = "UNKNOWN"
-        case["troubleshooting"] = "NOT_STARTED"
-        return jsonify({
-            "reply": "I'm sorry, but it looks like this might not be about an Anker product — "
-                     "we only handle support for Anker electronics (chargers, robot vacuums, earbuds, etc.). "
-                     "Could you tell me which product you're having trouble with? 🤔",
-            "cards": [],
-            "trace": {"emotion": emotion, "scope": scope, "product": "—", "order": order_id or "未提供",
-                      "warranty": "—", "dealer": "—", "troubleshooting": "—",
-                      "allowed": ["ask_product", "search_knowledge"], "forbidden": ["propose_replacement", "direct_refund"],
-                      "reasons": ["LLM 意图识别：用户问题与 Anker 电子产品无关，重置 case，引导正确产品"]}
-        })
-    
-    # 如果是新话题，重置产品和排障状态
-    if intent.get("is_new_topic") and intent.get("mentioned_product"):
-        case["product"] = None
-        case["troubleshooting"] = "NOT_STARTED"
-    
+
+    # 若规则消歧没结果，但 LLM 感知明确给了品类，用感知结果兜底（PROBABLE）
+    if not pr["product"] and pr["state"] in ("CONFLICTED", "UNKNOWN") and product_hint:
+        hint_map = {"breast_pump": "breast_pump", "robot_vacuum": "robot_vacuum",
+                    "power_bank": "power_bank", "earbuds": "earbuds",
+                    "camera": "camera", "speaker": "speaker"}
+        cat = hint_map.get(product_hint)
+        if cat:
+            for p in PRODUCTS:
+                if p["category"] == cat:
+                    pr = {"product": p, "evidence": f"llm_perception={cat}", "state": "PROBABLE"}
+                    break
+
     if pr["product"]:
         case["product"] = pr["product"]
         case["product_state"] = pr["state"]
         case["product_unknown"] = False
     elif pr["evidence"] == "no_product_mentioned":
-        # 用户没提新产品词，沿用之前的产品（比如"还是不行"）
+        # 用户没提新产品词，沿用之前的产品（如"还是不行""ok"）
         pass
     else:
-        # unknown_product 或 ambiguous_S1Pro：产品不确定
         case["product"] = None
         case["product_state"] = pr["state"]
-        # 只有明确不认识的产品才标记为 unknown
         case["product_unknown"] = (pr["evidence"] == "unknown_product")
 
+    # 知识库检索（本体约束），留痕
     fault = match_fault(case["product"]["id"], text) if case["product"] else None
+    if case["product"]:
+        trace_tool(case, "search_knowledge",
+                   {"product": case["product"]["name"], "query": text[:40]},
+                   fault["fault_name"] if fault else "no match")
+
     if "replace" in text.lower() or "换货" in text:
         case["troubleshooting"] = "FAILED"  # demo：用户主动要求换货视作排障失败
 
+    # ===== L4 决策：Decision Ontology 计算合法动作空间 =====
     allowed, forbidden, reasons = allowed_actions(case)
 
-    # 短问候语：先友好回应，再引导说问题
-    greetings = ["hi", "hello", "hey", "hii", "hiya", "你好", "哈喽", "嗨", "早上好", "下午好", "晚上好", "在吗"]
-    if text.strip().lower() in greetings or (len(text.strip()) <= 6 and any(g in text.lower() for g in greetings)):
-        return jsonify({
-            "reply": "Hi there! 👋 I'm OntoCare, Anker's after-sales assistant. What seems to be the problem? "
-                     "You can tell me the product issue, upload a photo of the error, or share your order number (ORD-XXXX).",
-            "cards": [],
-            "trace": {"emotion": emotion, "scope": scope, "product": "—", "order": order_id or "未提供",
-                      "warranty": "—", "dealer": "—", "troubleshooting": "—",
-                      "allowed": ["ask_product", "search_knowledge"], "forbidden": ["propose_replacement", "direct_refund"],
-                      "reasons": ["用户问候，先友好回应，引导描述问题"]}
-        })
-
-    # 1) 确定性后端先给出结构化卡片 + 模板兜底
+    # 1) 确定性后端先给结构化卡片 + 模板兜底
     reply, cards = build_reply(case, emotion, order_id, order, fault, allowed, forbidden)
     # 2) 再让 LLM 在【合法动作】内把话术写自然；失败则用模板
     system = ("You are OntoCare, Anker's after-sales agent for overseas customers. "
               "STRICT RULES: recommend ONLY actions in [ALLOWED]; NEVER promise anything in [FORBIDDEN]. "
               "Do not guess warranty or dealer status — if evidence says UNKNOWN, say so and ask. "
               "Be concise, warm, and match the user's emotion. Do NOT repeat troubleshooting steps already shown as cards. "
-              "Always reply in English. "
-              "If you don't know the answer, say so and offer a human. Reply in the user's language.")
+              "Always reply in English. If you don't know the answer, say so and offer a human.")
     kb_hint = f"{fault['fault_name']}: " + " | ".join(fault["steps"]) if fault else "none yet"
     if vlm_ev:
         img_hint = (f"VLM read from photo: model={vlm_ev.get('product_model','')}, sku={vlm_ev.get('sku','')}, "
@@ -453,20 +549,17 @@ def chat():
                    f"Write the short customer-facing reply now.")
     llm_reply = call_llm(system, user_prompt)
     if llm_reply:
-        reply = llm_reply  # 话术用 LLM；卡片和 trace 仍是确定性后端产物
+        reply = llm_reply
+        case["llm_fail_count"] = 0
+    else:
+        # LLM 失败：模板兜底，累计失败次数；连续 2 次主动提示转人工
+        case["llm_fail_count"] = case.get("llm_fail_count", 0) + 1
+        if case["llm_fail_count"] >= 2:
+            reply = ("I'm having a little trouble on my side right now. Would you like me to connect you "
+                     "with a human specialist instead? They'll have the full context, so you won't need to repeat anything.")
 
-    trace = {
-        "emotion": emotion,
-        "evidence": pr["evidence"],
-        "image": (f"{img_name} · VLM:{vlm_ev.get('error_code','?')}/{vlm_ev.get('visible_issue','?')}"
-                  if vlm_ev else (img_name or "无")),
-        "product": case["product"]["name"] if case["product"] else "未确定",
-        "order": order_id or "未提供",
-        "warranty": case["warranty"],
-        "dealer": case["dealer"],
-        "troubleshooting": case["troubleshooting"],
-        "allowed": allowed, "forbidden": forbidden, "reasons": reasons,
-    }
+    trace = _trace_view(emotion, scope, case, order_id, allowed, forbidden, reasons,
+                        pr["evidence"], img_name, vlm_ev)
     SESSIONS[sid] = case
     return jsonify({"reply": reply, "cards": cards, "trace": trace})
 

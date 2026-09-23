@@ -55,13 +55,18 @@
   .reason{font-size:11.5px;line-height:1.6;margin-top:4px;}
   .reason div{background:var(--ank-l);border-left:3px solid var(--ank);padding:5px 9px;border-radius:0 7px 7px 0;margin:4px 0;color:#334155;}
   .emotag{display:inline-block;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:700;}
+  .audit{font-size:11px;max-height:160px;overflow-y:auto;}
+  .audit .ai{border-left:2px solid var(--ank);background:#F8FAFC;padding:5px 8px;border-radius:0 6px 6px 0;margin-bottom:5px;}
+  .audit .ai .an{font-weight:700;color:var(--ank-d);font-size:10.5px;}
+  .audit .ai .io{color:#64748B;font-size:10px;margin-top:2px;line-height:1.5;word-break:break-word;}
+  .audit .ai .rs{color:#334155;font-size:10px;margin-top:2px;font-weight:600;}
 </style>
 </head>
 <body>
   <div class="topbar">
     <div class="logo">OC</div>
     <div class="t"><b>OntoCare</b><span id="subtitle">服务本体 + 决策本体 · 安克 L3 售后 Agent</span></div>
-    <div class="badge">DEMO · LLM=gpt-5.6 · VLM=qwen3-vl · 规则硬约束</div>
+    <div class="badge">DEMO · LLM=DeepSeek · VLM=qwen3-vl · 规则硬约束</div>
     <div class="lang">
       <button id="btnZh" class="on" onclick="setLang('zh')">中文</button>
       <button id="btnEn" onclick="setLang('en')">EN</button>
@@ -180,6 +185,15 @@ function render(t){
   const rows=[["产品",t.product],["订单",t.order],["质保",t.warranty],["经销商",t.dealer],["排障",t.troubleshooting],["图片",t.image]];
   let h=`<div class="panel"><div class="pt">感知与证据</div><div class="chips">${emoTag(t.emotion)}</div>
          <div class="grid2" style="margin-top:7px">${rows.map(r=>`<div class="kv"><span>${r[0]}</span><b>${r[1]}</b></div>`).join("")}</div></div>`;
+  // 执行记录（工具审计）：每次查订单/经销商/知识的输入输出
+  const tt=t.tool_trace||[];
+  if(tt.length){
+    h+=`<div class="panel"><div class="pt">执行记录 · Audit Trail (${tt.length})</div><div class="audit">`+
+      tt.slice().reverse().map(x=>`<div class="ai"><div class="an">⚙ ${x.action}</div>
+        <div class="io">${Object.entries(x.input||{}).map(([k,v])=>`${k}: ${v}`).join("<br>")||"—"}</div>
+        <div class="rs">→ ${x.result}</div></div>`).join("")+
+      `</div></div>`;
+  }
   h+=`<div class="panel"><div class="pt">允许动作 (Allowed)</div><div class="chips">${t.allowed.map(a=>`<span class="chip ok">${a}</span>`).join("")||"<span style='font-size:11px;color:#999'>—</span>"}</div></div>`;
   h+=`<div class="panel"><div class="pt">被禁动作 (Forbidden)</div><div class="chips">${(t.forbidden||[]).map(a=>`<span class="chip bad">${a}</span>`).join("")||"<span style='font-size:11px;color:#999'>无</span>"}</div></div>`;
   h+=`<div class="panel"><div class="pt">决策理由 (Why)</div><div class="reason">${t.reasons.map(r=>"<div>"+r+"</div>").join("")}</div></div>`;
