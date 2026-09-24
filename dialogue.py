@@ -12,6 +12,7 @@ END_WORDS = {
     "就这样", "结束", "没问题了", "没有其他问题了", "thanks", "thank you",
     "no thanks", "that's all", "all good", "no more questions",
     "不用了谢谢", "谢谢不用了", "没有了谢谢", "没了谢谢",
+    "再见", "拜拜", "回头见", "goodbye", "bye", "see you",
 }
 
 
@@ -20,8 +21,20 @@ def _normalize(text):
 
 
 def is_ending(text):
-    """Match short closing utterances, not phrases such as '没有订单'."""
-    return _normalize(text) in END_NORMALIZED
+    """Match closing utterances while allowing a farewell after a short sentence."""
+    normalized = _normalize(text)
+    if normalized in END_NORMALIZED:
+        return True
+    if not re.search(r"(?:再见|拜拜|回头见|goodbye|bye|seeyou)$", normalized):
+        return False
+    # A farewell after an active after-sales question is still part of that request.
+    service_terms = (
+        "安克", "anker", "订单", "产品", "型号", "质保", "保修", "退款", "退货",
+        "换货", "故障", "坏了", "充电", "吸奶", "扫地", "报错", "维修",
+        "order", "product", "model", "warranty", "refund", "return", "replace",
+        "repair", "broken", "charging", "error", "how", "what", "can i",
+    )
+    return not any(term in normalized for term in service_terms)
 
 
 END_NORMALIZED = {_normalize(word) for word in END_WORDS}

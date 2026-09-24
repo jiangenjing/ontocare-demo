@@ -48,10 +48,22 @@ class DialogueState(unittest.TestCase):
     def test_short_negative_is_not_any_sentence_containing_no(self):
         self.assertTrue(is_ending("没。"))
         self.assertTrue(is_ending("不用了，谢谢"))
+        self.assertTrue(is_ending("没什么可以帮我的，再见。"))
+        self.assertTrue(is_ending("好的，拜拜"))
         self.assertFalse(is_ending("没有订单"))
         self.assertFalse(is_ending("没有发票，能换货吗"))
+        self.assertFalse(is_ending("扫地机还是不充电，再见"))
         self.assertEqual(step_reference("刚才的第3步是什么"), 3)
         self.assertEqual(step_reference("那一步呢", 2), 2)
+
+    def test_farewell_gets_warm_reply_and_keeps_case(self):
+        self.ask("ORD-2002 robot won't charge")
+        with patch.object(app, "call_llm", side_effect=AssertionError("closing called model")):
+            closed = self.ask("没什么可以帮我的，再见。")
+        self.assertEqual(closed["trace"]["phase"], "CLOSED")
+        self.assertEqual(closed["trace"]["order"], "ORD-2002")
+        self.assertIn("感谢", closed["reply"])
+        self.assertIn("再见", closed["reply"])
 
     def test_model_receives_bounded_history_without_contact_details(self):
         prompts = []
