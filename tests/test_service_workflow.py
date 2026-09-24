@@ -133,6 +133,17 @@ class ServiceWorkflow(unittest.TestCase):
         self.assertIn("guide_contact_seller", result["trace"]["allowed"])
         self.assertIn("prepare_return_review", result["trace"]["forbidden"])
 
+    def test_seller_alias_and_typo_matching_still_requires_exact_country(self):
+        alias = app.match_dealer("Germany", "ABC Electronics GmbH Official Store")
+        typo = app.match_dealer("Germany", "ABC Elektronics")
+        wrong_country = app.match_dealer("France", "ABC Electronics GmbH")
+        unrelated = app.match_dealer("Germany", "Unrelated ABC Parts")
+        self.assertEqual(alias["status"], "AUTHORIZED")
+        self.assertEqual(typo["status"], "AUTHORIZED")
+        self.assertGreaterEqual(typo["score"], 0.90)
+        self.assertEqual(wrong_country["status"], "NOT_AUTHORIZED")
+        self.assertEqual(unrelated["status"], "NOT_AUTHORIZED")
+
     def test_authorized_recent_return_only_prepares_human_review(self):
         result = self.ask("ORD-2016 我要退货")
         self.assertEqual(result["trace"]["dealer"], "AUTHORIZED")
