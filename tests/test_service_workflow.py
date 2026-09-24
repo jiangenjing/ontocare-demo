@@ -105,6 +105,17 @@ class ServiceWorkflow(unittest.TestCase):
         self.assertNotIn("已过保", result["reply"])
         self.assertIn("prepare_return_review", trace["forbidden"])
 
+    def test_return_request_is_carried_into_order_number_followup(self):
+        first = self.ask("我要退货")
+        self.assertIn("订单号", first["reply"])
+        second = self.ask("我的订单是 ORD-2016")
+        self.assertEqual(second["trace"]["order_status"], "FOUND")
+        self.assertEqual(second["trace"]["slots"]["requested_action"]["value"], "RETURN_REVIEW")
+        self.assertIn("return_review", second["trace"]["work_items"])
+        self.assertIn("prepare_return_review", second["trace"]["allowed"])
+        self.assertIn("退货诉求", second["reply"])
+        self.assertIn("人工审核", second["reply"])
+
     def test_old_unmatched_order_is_not_silently_applied_to_return(self):
         self.ask("DEMO-O-999官网查不到，是否过保？")
         result = self.ask("我要退货")
