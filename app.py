@@ -7,7 +7,8 @@ Anker Ontology-Driven Service Agent — MVP 后端
 运行：pip install flask  &&  python app.py   打开 http://127.0.0.1:5000
 """
 import json, os, re, math, uuid
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 import urllib.request
 from flask import Flask, request, jsonify, send_from_directory, g
 from workflow import work_items, tool_trace, handoff
@@ -169,6 +170,58 @@ Reply in JSON only:
         pass
     g.model_status = "INVALID_RESPONSE"
     return {"is_new_topic": False, "mentioned_product": None, "is_irrelevant": False}
+
+def is_light_chat(text: str) -> bool:
+    """Recognize greetings and simple date questions without changing case state."""
+    normalized = re.sub(r"[\s\u3000，。！？!?,.～~]+", "", text.lower())
+    if normalized in {"hi", "hello", "hey", "你好", "嗨", "在吗", "早上好", "下午好", "晚上好"}:
+        return True
+    asks_day = re.search(r"(今天|今日).{0,5}(星期几|周几|礼拜几)|(whatdayisittoday|whatdayoftheweekisittoday)", normalized)
+    has_support_topic = re.search(r"安克|anker|订单|质保|保修|退款|换货|故障|型号|充电|吸奶|扫地|order|warranty|refund|replace|repair|model", normalized, re.I)
+    return bool(asks_day and not has_support_topic)
+
+def light_chat_reply(text: str, lang: str) -> str | None:
+    """Answer a benign side question in an isolated prompt with no case data."""
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    weekday = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")[today.weekday()]
+    system = (
+        "You are a friendly Anker after-sales assistant. Answer this brief general question directly in at most two short sentences. "
+        "Do not ask for a product model unless the user asks about Anker support. Do not mention orders, warranty, or any prior customer case. "
+        "For current date/day questions, use this authoritative local date: " + today.isoformat() + " (" + weekday + "). "
+        "If you do not know a changing fact, say so briefly. End with a light offer to help with Anker products only when natural. "
+        "Reply in Chinese." if lang == "zh" else
+        "You are a friendly Anker after-sales assistant. Answer this brief general question directly in at most two short sentences. "
+        "Do not ask for a product model unless the user asks about Anker support. Do not mention orders, warranty, or any prior customer case. "
+        "For current date/day questions, use this authoritative local date: " + today.isoformat() + " (" + weekday + "). "
+        "If you do not know a changing fact, say so briefly. End with a light offer to help with Anker products only when natural. Reply in English."
+    )
+    return call_llm(system, text, timeout=12)
+
+def side_chat_response(case: dict, text: str, request_id: str, lang: str, reply: str):
+    """Return a side-chat answer while keeping the existing service case untouched."""
+    order_id = case.get("order_id")
+    order = lookup_order(order_id)
+    fault = match_fault(case["product"]["id"], case.get("last_issue", "")) if case.get("product") and case.get("last_issue") else None
+    slots, missing = slots_view(case, order, fault)
+    model_status = getattr(g, "model_status", "NOT_CONFIGURED")
+    trace = {
+        "scope": "LIGHT_CHAT", "phase": case.get("phase", "CONSULTATION"),
+        "slots": slots, "missing_slots": missing, "memory_turns": len(case.get("history", [])),
+        "product": case["product"]["name"] if case.get("product") else "未确定",
+        "product_state": case.get("product_state", "UNKNOWN"),
+        "order": order_id or "未提供", "order_status": order["status"],
+        "warranty": case.get("warranty", "UNKNOWN"), "dealer": case.get("dealer", "UNKNOWN"),
+        "troubleshooting": case.get("troubleshooting", "NOT_STARTED"),
+        "allowed": ["answer_brief_general_question", "continue_current_case"],
+        "forbidden": ["change_case_state", "direct_refund", "propose_replacement"],
+        "reasons": ["轻量闲聊与售后案件隔离；本轮不修改案件槽位或业务状态"],
+        "work_items": ["light_chat"], "knowledge_source": "NONE",
+        "model_status": model_status, "model": LLM_MODEL if model_status != "NOT_CONFIGURED" else "无模型配置",
+        "request_id": request_id, "rule_version": "m0-safe-3",
+        "case_source": "原会话案件保留；轻量闲聊未写入售后记忆",
+    }
+    return jsonify({"reply": reply, "cards": [], "trace": trace,
+                    "model_status": model_status, "request_id": request_id})
 
 def detect_emotion(text: str) -> str:
     t = text.lower()
@@ -396,12 +449,34 @@ def chat():
                                      "phase": "CONSULTATION", "history": []})
     if case.get("phase") == "CLOSED" or is_ending(text):
         return closed_case_response(case, text, request_id, lang)
+    if is_light_chat(text):
+        reply = light_chat_reply(text, lang)
+        model_status = getattr(g, "model_status", "NOT_CONFIGURED")
+        if not reply:
+            return jsonify({"error": "model_unavailable", "request_id": request_id,
+                            "reply": "模型调用失败，本轮未生成回复。请稍后重试。" if lang == "zh" else "Model request failed; no reply was generated. Please try again later.",
+                            "model_status": model_status}), 503
+        return side_chat_response(case, text, request_id, lang, reply)
+    previous_product = case.get("product")
+    intent = llm_understand_intent(text, previous_product["name"] if previous_product else None, case)
+    model_status = getattr(g, "model_status", "NOT_CONFIGURED")
+    if model_status in ("ERROR", "INVALID_RESPONSE"):
+        return jsonify({"error": "model_unavailable", "request_id": request_id,
+                        "reply": "模型调用失败，本轮未生成客服判断。请稍后重试。" if lang == "zh" else "Model request failed. No support decision was generated.",
+                        "model_status": model_status}), 503
+    if intent.get("is_irrelevant") and not intent.get("mentioned_product") and not detect_logistics_damage(text):
+        reply = light_chat_reply(text, lang)
+        model_status = getattr(g, "model_status", "NOT_CONFIGURED")
+        if not reply:
+            return jsonify({"error": "model_unavailable", "request_id": request_id,
+                            "reply": "模型调用失败，本轮未生成回复。请稍后重试。" if lang == "zh" else "Model request failed; no reply was generated.",
+                            "model_status": model_status}), 503
+        return side_chat_response(case, text, request_id, lang, reply)
     case["last_message"] = text
     if detect_logistics_damage(text):
         case["logistics_damage"] = True
     elif re.search(r"不充电|充不上|不吸|故障|报错|not charging|won't charge|not sucking|error code", text, re.I):
         case.pop("logistics_damage", None)
-    previous_product = case.get("product")
     mentioned = resolve_product(text, None)
     if mentioned["product"] and previous_product and mentioned["product"]["id"] != previous_product["id"]:
         # A newly named product cannot inherit the previous product's order or warranty.
@@ -409,13 +484,6 @@ def chat():
             case.pop(key, None)
         case.update(warranty="UNKNOWN", dealer="UNKNOWN", troubleshooting="NOT_STARTED")
         case["history"] = []
-
-    intent = llm_understand_intent(text, previous_product["name"] if previous_product else None, case)
-    model_status = getattr(g, "model_status", "NOT_CONFIGURED")
-    if model_status in ("ERROR", "INVALID_RESPONSE"):
-        return jsonify({"error": "model_unavailable", "request_id": request_id,
-                        "reply": "模型调用失败，本轮未生成客服判断。请稍后重试。" if lang == "zh" else "Model request failed. No support decision was generated.",
-                        "model_status": model_status}), 503
 
     m = re.search(r"(?:ORD-\d{4}|DEMO-O-\d+)", text, re.I)
     explicit_order = (m.group(0).upper() if m else str(body.get("order_id") or "").upper())

@@ -71,6 +71,54 @@ class DialogueState(unittest.TestCase):
         self.assertNotIn("test@example.com", prompts[1])
         self.assertNotIn("13812345678", prompts[1])
 
+    def test_greeting_and_day_question_do_not_change_case(self):
+        case = app.SESSIONS.setdefault("dst", {"product": None, "warranty": "UNKNOWN",
+                    "dealer": "UNKNOWN", "troubleshooting": "NOT_STARTED",
+                    "phase": "CONSULTATION", "history": []})
+        case.update(order_id="ORD-2002", last_issue="robot won't charge", phase="TROUBLESHOOT")
+        prompts = []
+
+        def fake_call(system, user, timeout=15):
+            g.model_status = "OK"
+            prompts.append((system, user))
+            return "今天是星期四。还需要我帮你查安克产品问题吗？"
+
+        with patch.object(app, "call_llm", side_effect=fake_call):
+            result = self.ask("hi 今天周几？")
+
+        self.assertIn("星期四", result["reply"])
+        self.assertEqual(result["trace"]["phase"], "TROUBLESHOOT")
+        self.assertEqual(result["trace"]["order"], "ORD-2002")
+        self.assertEqual(result["trace"]["memory_turns"], 0)
+        self.assertNotIn("ORD-2002", prompts[0][1])
+        self.assertNotIn("robot won't charge", prompts[0][1])
+
+    def test_model_classified_side_question_preserves_case_and_history(self):
+        case = app.SESSIONS.setdefault("dst", {"product": None, "warranty": "UNKNOWN",
+                    "dealer": "UNKNOWN", "troubleshooting": "NOT_STARTED",
+                    "phase": "CONSULTATION", "history": []})
+        case.update(order_id="ORD-2002", last_issue="robot won't charge", phase="TROUBLESHOOT",
+                    history=[{"user": "robot won't charge", "assistant": "Try step one."}])
+        calls = []
+
+        def fake_call(system, user, timeout=15):
+            g.model_status = "OK"
+            calls.append(user)
+            if len(calls) == 1:
+                return '{"is_new_topic": true, "mentioned_product": null, "is_irrelevant": true, "step_number": null}'
+            return "今天天气我无法实时查询。需要的话，我可以继续帮你处理安克售后问题。"
+
+        with patch.object(app, "call_llm", side_effect=fake_call):
+            result = self.ask("今天附近天气怎么样？")
+
+        self.assertIn("天气", result["reply"])
+        self.assertEqual(result["trace"]["phase"], "TROUBLESHOOT")
+        self.assertEqual(result["trace"]["order"], "ORD-2002")
+        self.assertEqual(result["trace"]["memory_turns"], 1)
+        self.assertEqual(len(case["history"]), 1)
+        self.assertNotIn("ORD-2002", calls[1])
+        self.assertNotIn("robot won't charge", calls[1])
+
 
 if __name__ == "__main__":
     unittest.main()
