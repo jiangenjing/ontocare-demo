@@ -22,6 +22,15 @@ def work_items(text, case, order, fault, scope):
         items.append("return_review")
     if re.search(r"换货|更换|replace|replacement|exchange", t):
         items.append("replacement_review")
+    elif (case.get("requested_action")
+          and re.search(r"ORD-\d{4}|DEMO-O-\d+|订单|order|purchase|purchased|receipt|proof|seller|store|shop|卖家|店铺|购买渠道|购买凭证|国家|country", t, re.I)):
+        remembered_item = {
+            "RETURN_REVIEW": "return_review",
+            "REFUND_REVIEW": "refund_review",
+            "REPLACEMENT_REVIEW": "replacement_review",
+        }.get(case["requested_action"])
+        if remembered_item:
+            items.append(remembered_item)
     if case.get("order_id") or re.search(r"订单|质保|保修|order|warranty", t):
         items.append("order_check")
     if fault or re.search(r"不吸|充不上|故障|坏了|报错|不工作|not sucking|not charging|won't charge|dead|offline|error|problem", t):
