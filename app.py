@@ -13,6 +13,8 @@ import urllib.request
 from flask import Flask, request, jsonify, send_from_directory, g
 from workflow import work_items, tool_trace, handoff
 from dialogue import is_ending, remember_turn, redact_for_memory, step_reference, slots_view, phase_for
+from ontology import (validate_fixture_relations, validate_phase, validate_actions,
+                      validate_policy_links, validate_relation, policy_allows)
 
 # ---------- LLM 适配层（OpenAI 兼容；key 从环境变量读，不写死） ----------
 LLM_BASE = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
@@ -92,6 +94,10 @@ ORDERS     = load("orders.json")
 DEALERS    = load("dealers.json")
 KB_LIST    = load("kb.json")
 POLICY     = load("policies.json")
+ONTOLOGY   = load("ontology.json")
+RULE_VERSION = ONTOLOGY["version"]
+validate_fixture_relations(ONTOLOGY, ORDERS, PRODUCTS)
+validate_policy_links(ONTOLOGY, POLICY)
 
 # ---------- 按产品对象限定的模拟知识条目检索 ----------
 # 只在【已确认产品】的知识范围内做 TF-IDF 检索，避免跨产品/同名产品污染。
@@ -217,7 +223,7 @@ def side_chat_response(case: dict, text: str, request_id: str, lang: str, reply:
         "reasons": ["轻量闲聊与售后案件隔离；本轮不修改案件槽位或业务状态"],
         "work_items": ["light_chat"], "knowledge_source": "NONE",
         "model_status": model_status, "model": LLM_MODEL if model_status != "NOT_CONFIGURED" else "无模型配置",
-        "request_id": request_id, "rule_version": "m0-safe-3",
+        "request_id": request_id, "rule_version": RULE_VERSION,
         "case_source": "原会话案件保留；轻量闲聊未写入售后记忆",
     }
     return jsonify({"reply": reply, "cards": [], "trace": trace,
@@ -315,10 +321,13 @@ def match_dealer(country: str | None, seller: str | None):
             if sl == nl:
                 return {"status": "AUTHORIZED" if d["authorized"] else "NOT_AUTHORIZED",
                         "matched": name}
-    return {"status": "NO_MATCH"}
+    # The business rule treats a seller absent from the country-scoped
+    # authorization list as non-authorized; never infer authorization by LLM.
+    return {"status": "NOT_AUTHORIZED", "matched": None}
 
 # ---------- 3. Decision Ontology：状态 → 合法动作空间（核心） ----------
-def allowed_actions(case: dict, asked_refund: bool = False, asked_replacement: bool = False):
+def allowed_actions(case: dict, asked_refund: bool = False, asked_replacement: bool = False,
+                    asked_return: bool = False):
     """返回 (allowed[], forbidden[])。规则全部确定性，LLM 只能在 allowed 里选。"""
     allowed, forbidden, reasons = [], [], []
     prod = case.get("product")
@@ -328,41 +337,81 @@ def allowed_actions(case: dict, asked_refund: bool = False, asked_replacement: b
 
     if not prod:
         allowed += ["ask_product", "search_knowledge"]
+        if case.get("requested_action"):
+            allowed += ["ask_order", "request_proof"]
+            forbidden += ["prepare_return_review", "prepare_replacement_review"]
         forbidden += ["propose_replacement", "direct_refund"]
         reasons.append("产品未确认：不允许任何售后办理动作")
+        validate_actions(ONTOLOGY, allowed + forbidden)
         return allowed, forbidden, reasons
 
     allowed += ["search_knowledge", "run_troubleshooting", "escalate_human"]
 
     # 订单查无：UNKNOWN ≠ EXPIRED，禁止判过保、禁止办理
     if warranty in ("UNKNOWN", "PENDING_RECHECK"):
-        forbidden += ["propose_replacement", "direct_refund", "tell_expired"]
+        forbidden += ["propose_replacement", "direct_refund", "tell_expired",
+                      "prepare_return_review", "prepare_replacement_review"]
         allowed += ["ask_country", "ask_seller", "request_proof"]
+        if case.get("order_status") != "FOUND":
+            allowed.append("ask_order")
         reasons.append("订单未核实或购买日期待重核：禁止判定过保或承诺办理")
+        validate_actions(ONTOLOGY, allowed + forbidden)
+        return allowed, forbidden, reasons
+
+    if dealer == "NOT_AUTHORIZED":
+        forbidden += ["propose_replacement", "direct_refund",
+                      "prepare_return_review", "prepare_replacement_review"]
+        allowed += ["guide_contact_seller"]
+        reasons.append("非授权经销商：引导联系购买渠道，不进入官方保修")
+        allowed = list(dict.fromkeys(allowed))
+        validate_actions(ONTOLOGY, allowed + forbidden)
         return allowed, forbidden, reasons
 
     if warranty == "EXPIRED":
         forbidden += ["propose_replacement", "direct_refund"]
         allowed += ["propose_paid_repair"]
         reasons.append("已过保：免费换货/退款均不可用")
-        return list(dict.fromkeys(allowed)), forbidden, reasons
+        allowed = list(dict.fromkeys(allowed))
+        validate_actions(ONTOLOGY, allowed + forbidden)
+        return allowed, forbidden, reasons
 
     # warranty == VALID
-    if ts == "FAILED" and dealer == "AUTHORIZED":
+    if policy_allows(POLICY, "prepare_replacement_review", case):
         allowed += ["prepare_replacement_review"]
         reasons.append("排障失败 + 在保 + 授权经销商：仅整理换货人工审核材料")
-    if dealer == "NOT_AUTHORIZED":
-        forbidden += ["propose_replacement", "direct_refund"]
-        allowed += ["guide_contact_seller"]
-        reasons.append("非授权经销商：引导联系购买渠道，不进入官方保修")
-    elif case.get("within_30d") and dealer == "AUTHORIZED":
+    if policy_allows(POLICY, "prepare_return_review", case):
         allowed += ["prepare_return_review"]
         reasons.append("模拟订单显示30天内；退货资格仍需渠道、商品状态和人工核对")
     forbidden += ["direct_refund", "propose_replacement"]
-    if asked_refund or asked_replacement:
+    if asked_refund or asked_return or asked_replacement:
         reasons.append("演示环境无真实退款或换货执行器，不得声称已办理")
     allowed = list(dict.fromkeys(allowed)); forbidden = list(dict.fromkeys(forbidden))
+    validate_actions(ONTOLOGY, allowed + forbidden)
     return allowed, forbidden, reasons
+
+
+def ontology_relations(session_id, case, order):
+    """Expose only supported case/order/product edges with their evidence source."""
+    edges = []
+    if order["status"] == "FOUND":
+        record = order["order"]
+        edges.extend([
+            {"relation": "CONTAINS", "subject_type": "Order", "subject": case.get("order_id"),
+             "object_type": "SKU", "object": record["sku"], "source": "TEST_FIXTURE"},
+            {"relation": "SOLD_BY", "subject_type": "Order", "subject": case.get("order_id"),
+             "object_type": "Seller", "object": record["seller"], "source": "TEST_FIXTURE"},
+        ])
+        fixture_product = resolve_product("", record["sku"])["product"]
+        if fixture_product:
+            edges.append({"relation": "INSTANCE_OF", "subject_type": "SKU", "subject": record["sku"],
+                          "object_type": "Product", "object": fixture_product["name"], "source": "TEST_FIXTURE"})
+    if case.get("last_issue"):
+        issue = redact_for_memory(case["last_issue"])
+        edges.append({"relation": "HAS_ISSUE", "subject_type": "Case", "subject": session_id,
+                      "object_type": "Issue", "object": issue, "source": "USER_CLAIM"})
+    for edge in edges:
+        validate_relation(ONTOLOGY, edge["relation"], edge["subject_type"], edge["object_type"])
+    return edges
 
 # ---------- 主流程 ----------
 @app.route("/")
@@ -372,7 +421,7 @@ def index():
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "model_configured": bool(LLM_KEY and LLM_MODEL),
-                    "rule_version": "m0-safe-3"})
+                    "rule_version": RULE_VERSION})
 
 UP_DIR = os.path.join(BASE, "uploads")
 os.makedirs(UP_DIR, exist_ok=True)
@@ -400,7 +449,7 @@ def closed_case_response(case, message, request_id, lang):
              "allowed": ["new_case"], "forbidden": ["direct_refund", "propose_replacement"],
              "reasons": ["用户明确结束本次咨询；未发起售后写操作"],
              "work_items": ["close_conversation"], "model_status": "SKIPPED_CLOSING",
-             "rule_version": "m0-safe-3", "request_id": request_id}
+             "rule_version": RULE_VERSION, "request_id": request_id}
     return jsonify({"reply": reply, "cards": [], "trace": trace,
                     "model_status": "SKIPPED_CLOSING", "request_id": request_id})
 
@@ -490,7 +539,7 @@ def chat():
     order_switched = bool(explicit_order and case.get("order_id") and case["order_id"] != explicit_order)
     if explicit_order:
         if order_switched:
-            for key in ("purchase_date_claim", "date_claim_pending", "last_issue", "product_conflict_pending", "user_reported_failure", "requested_action"):
+            for key in ("purchase_date_claim", "date_claim_pending", "last_issue", "product_conflict_pending", "user_reported_failure"):
                 case.pop(key, None)
             case["troubleshooting"] = "NOT_STARTED"
             case["history"] = []
@@ -500,13 +549,15 @@ def chat():
     case["order_status"] = order["status"]
     if order["status"] == "FOUND":
         case["warranty"] = order["warranty"]
-        case["dealer"] = match_dealer(order["order"]["country"], order["order"]["seller"])["status"]
+        dealer_match = match_dealer(order["order"]["country"], order["order"]["seller"])
+        case["dealer"] = dealer_match["status"]
+        case["dealer_match"] = dealer_match.get("matched")
         case["within_30d"] = order["within_30d"]
         sku = order["order"]["sku"]
     else:
         sku = None
         if explicit_order:
-            case.update(warranty="UNKNOWN", dealer="UNKNOWN", within_30d=False)
+            case.update(warranty="UNKNOWN", dealer="UNKNOWN", dealer_match=None, within_30d=False)
     product_result = resolve_product(text, sku)
     # A fixture order can suggest a product, but a conflicting customer claim
     # must be resolved before applying that fixture's warranty to this issue.
@@ -536,6 +587,16 @@ def chat():
     elif not case.get("product"):
         case["product_state"] = "UNKNOWN"
 
+    asked_return = bool(re.search(r"退货|return", text, re.I))
+    asked_refund = bool(re.search(r"退款|refund", text, re.I))
+    asked_replacement = bool(re.search(r"换货|更换|replace|replacement|exchange", text, re.I))
+    if asked_return:
+        case["requested_action"] = "RETURN_REVIEW"
+    elif asked_refund:
+        case["requested_action"] = "REFUND_REVIEW"
+    elif asked_replacement:
+        case["requested_action"] = "REPLACEMENT_REVIEW"
+
     if re.search(r"(?:买|购买|日期|说错|actually|purchased).{0,25}\d{4}[-/]\d{1,2}[-/]\d{1,2}", text, re.I):
         claimed = re.search(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", text)
         case["purchase_date_claim"] = claimed.group(0) if claimed else None
@@ -555,17 +616,14 @@ def chat():
     elif case["troubleshooting"] == "NEEDS_GUIDANCE":
         case["troubleshooting"] = "NOT_STARTED"
 
-    if case.get("product") and not case.get("last_issue") and not re.fullmatch(r"(?:是)?(?:吸奶器|扫地机)", text):
+    has_fault_claim = bool(re.search(r"故障|坏了|不充|不吸|报错|不工作|error|broken|dead|won't|not working|problem", text, re.I))
+    if (case.get("product") and not case.get("last_issue")
+            and not re.fullmatch(r"(?:是)?(?:吸奶器|扫地机)", text)
+            and (not case.get("requested_action") or has_fault_claim)):
         case["last_issue"] = text
     query = " ".join(x for x in (case.get("last_issue"), text) if x)
     fault = match_fault(case["product"]["id"], query) if case.get("product") else None
-    asked_refund = bool(re.search(r"退款|退货|refund|return", text, re.I))
-    asked_replacement = bool(re.search(r"换货|更换|replace|replacement|exchange", text, re.I))
-    if asked_refund:
-        case["requested_action"] = "REFUND_REVIEW"
-    elif asked_replacement:
-        case["requested_action"] = "REPLACEMENT_REVIEW"
-    allowed, forbidden, reasons = allowed_actions(case, asked_refund, asked_replacement)
+    allowed, forbidden, reasons = allowed_actions(case, asked_refund, asked_replacement, asked_return)
     emotion, scope = detect_emotion(text), detect_scope(text)
     if case.get("logistics_damage"):
         allowed = ["request_package_photos", "prepare_shipping_review"]
@@ -577,24 +635,25 @@ def chat():
     if product_conflict:
         reasons.insert(0, "用户所述产品与模拟订单 SKU 冲突：需核对购买凭证")
     items = work_items(text, case, order, fault, scope)
-    reply, cards = build_reply(case, text, order, fault, allowed, lang, scope, items, referenced_step)
+    reply, cards = build_reply(case, text, order, fault, allowed, lang, scope, items, referenced_step,
+                               explicit_order=bool(explicit_order))
     tool_steps = [
         tool_trace("resolve_product", case.get("product_state", "UNKNOWN"),
                    "用户陈述 + 测试产品目录", product_result["evidence"]),
         tool_trace("lookup_order", order["status"], "模拟订单", order_id or "未提供"),
         tool_trace("search_knowledge", "SKIPPED" if case.get("logistics_damage") else ("MATCHED" if fault else "NO_MATCH"),
                    "产品限定模拟知识", "物流问题不检索产品故障" if case.get("logistics_damage") else (fault["fault"] if fault else "无")),
-        tool_trace("evaluate_policy", "EVALUATED", "Python 决策本体 m0-safe-3",
+        tool_trace("evaluate_policy", "EVALUATED", "JSON Ontology + Python 白名单规则 " + RULE_VERSION,
                    "允许 %d 项；禁止 %d 项" % (len(allowed), len(forbidden))),
     ]
     handoff_draft = handoff(case, order, fault, items, reasons) if any(
-        i in items for i in ("refund_review", "replacement_review", "human_handoff", "shipping_damage_review")
+        i in items for i in ("refund_review", "return_review", "replacement_review", "human_handoff", "shipping_damage_review")
     ) else None
     if case.get("date_claim_pending"):
         cards.append({"title": "日期更正待核验" if lang == "zh" else "Date correction pending",
                       "body": "用户陈述：" + str(case["purchase_date_claim"]) + "；测试订单原日期未修改，质保结论需人工重核。" if lang == "zh" else
                               "Customer claim: " + str(case["purchase_date_claim"]) + "; fixture order date unchanged. Warranty needs review."})
-    case["phase"] = phase_for(case, order, fault)
+    case["phase"] = validate_phase(ONTOLOGY, phase_for(case, order, fault))
     slots, missing_slots = slots_view(case, order, fault)
     remember_turn(case, text, reply)
     trace = {"emotion": emotion, "scope": scope,
@@ -604,6 +663,8 @@ def chat():
              "product_state": case.get("product_state", "UNKNOWN"),
              "evidence": product_result["evidence"], "model_candidate": intent.get("mentioned_product") or "无",
              "order": order_id or "未提供",
+             "seller": order["order"]["seller"] if order["status"] == "FOUND" else "未提供",
+             "dealer_match": case.get("dealer_match"),
              "order_status": order["status"], "order_source": "TEST_FIXTURE" if order["status"] == "FOUND" else ("USER_CLAIM" if order_id else "NONE"),
              "ownership_status": "NOT_VERIFIED",
              "warranty": case["warranty"], "dealer": case["dealer"],
@@ -612,15 +673,18 @@ def chat():
              "knowledge_source": fault["fault"] if fault else "NONE", "image": "未处理",
              "allowed": allowed, "forbidden": forbidden, "reasons": reasons,
              "model_status": model_status, "model": LLM_MODEL if model_status != "NOT_CONFIGURED" else "无模型配置",
-             "request_id": request_id, "rule_version": "m0-safe-3",
+             "request_id": request_id, "rule_version": RULE_VERSION,
              "work_items": items, "tool_steps": tool_steps,
              "handoff": handoff_draft,
-             "case_source": "会话内存 + 模拟测试资料 + Python 规则"}
+             "ontology_relations": ontology_relations(sid, case, order),
+             "ontology_version": ONTOLOGY["version"],
+             "case_source": "会话内存 + 模拟测试资料 + JSON Ontology + Python 规则"}
     return jsonify({"reply": reply, "cards": cards, "trace": trace,
                     "model_status": model_status, "request_id": request_id})
 
 
-def build_reply(case, text, order, fault, allowed, lang, scope, items=None, referenced_step=None):
+def build_reply(case, text, order, fault, allowed, lang, scope, items=None, referenced_step=None,
+                explicit_order=False):
     zh = lang == "zh"
     items = items or []
     cards = []
@@ -651,9 +715,20 @@ def build_reply(case, text, order, fault, allowed, lang, scope, items=None, refe
     if case.get("date_claim_pending") and re.search(r"(日期|说错|actually|purchased)", text, re.I):
         return (("已记录你更正的购买日期。测试订单原始日期仍保留，质保与办理资格等待凭证重核。" if zh else
                  "I recorded your corrected purchase date. The fixture date remains unchanged pending proof review."), cards)
+    if order["status"] == "NOT_FOUND" and case.get("requested_action"):
+        action_name = {"RETURN_REVIEW": "退货", "REFUND_REVIEW": "退款", "REPLACEMENT_REVIEW": "换货"}.get(case["requested_action"], "售后")
+        order_source = "你刚提供的订单号" if explicit_order else "当前会话之前记录的订单号"
+        return (("收到，你想申请" + action_name + "。" + order_source + " " + case["order_id"] +
+                 "在模拟订单资料中没有匹配到。请确认或更正订单号，并补充购买平台/店铺与购买凭证；查无模拟记录不代表过保，目前也没有提交任何退货、退款或换货。") if zh else
+                ("I understand you want a " + action_name + ". The " + ("order number you just provided" if explicit_order else "order number previously recorded in this session") +
+                 " (" + case["order_id"] + ") was not found in the demo fixtures. Please confirm or correct it and share the seller/platform and proof of purchase. This does not establish that the product is out of warranty; no return, refund or replacement was submitted."), cards)
     if order["status"] == "NOT_FOUND":
         return (("模拟订单库未找到 " + case["order_id"] + "。这不代表过保；请提供购买渠道和凭证，暂不能办理退款或换货。" if zh else
                  "Order " + case["order_id"] + " is absent from the demo fixtures. Warranty is unknown; please provide proof of purchase."), cards)
+    if order["status"] == "NOT_PROVIDED" and case.get("requested_action"):
+        action_name = {"RETURN_REVIEW": "退货", "REFUND_REVIEW": "退款", "REPLACEMENT_REVIEW": "换货"}.get(case["requested_action"], "售后")
+        return (("收到，你想申请" + action_name + "。我先帮你核对订单和购买渠道；请提供这次售后对应的订单号和产品型号。若是经销商购买，请补充购买国家/地区、店铺名称及购买凭证。当前只收集核验信息，尚未提交任何办理。") if zh else
+                ("I understand you want a " + action_name + ". To check the order and seller, please share the order number and product model. For a reseller purchase, also share the country, seller name and proof of purchase. I am only collecting verification details; nothing has been submitted."), cards)
     if case.get("product_state") == "CONFLICTED" and case.get("order_id") and order["status"] == "FOUND":
         if re.search(r"哪个产品|which product|what product", text, re.I):
             earlier = resolve_product(case.get("last_issue") or "", None)["product"]
@@ -671,7 +746,22 @@ def build_reply(case, text, order, fault, allowed, lang, scope, items=None, refe
                  "S1 Pro can be a breast pump or a robot vacuum. Which one do you have?") if case.get("product_state") == "CONFLICTED" else
                 ("请告诉我具体产品型号和问题，我会按产品查找对应资料。" if zh else
                  "Please share the product model and the issue so I can check the right support information.")), cards
-    if "refund_review" in items or "replacement_review" in items:
+    if case.get("requested_action") and order["status"] == "FOUND" and case.get("dealer") == "NOT_AUTHORIZED":
+        seller = order["order"].get("seller") or "当前购买店铺"
+        return (("我查到模拟订单记录中的卖家是 " + seller + "，但它未匹配到对应国家的授权经销商名录。当前订单归属仍需购买凭证核实，官方演示不能代替商家受理" +
+                 ("退货/退款" if case["requested_action"] in ("RETURN_REVIEW", "REFUND_REVIEW") else "换货") +
+                 "；请先联系购买店铺，或提供凭证供人工核验。目前没有提交任何办理。") if zh else
+                ("The demo order lists " + seller + ", which did not match the authorized-dealer list for its country. Order ownership still needs proof. This demo cannot process a " +
+                 ("return/refund" if case["requested_action"] in ("RETURN_REVIEW", "REFUND_REVIEW") else "replacement") +
+                 " for this seller; please contact the store or provide proof for human review. Nothing was submitted."), cards)
+    if case.get("requested_action") in ("RETURN_REVIEW", "REFUND_REVIEW") and order["status"] == "FOUND" and not case.get("within_30d"):
+        if fault and fault.get("after_failed") != "honest_escalate_no_fabrication":
+            steps = "\n".join(str(i + 1) + ". " + step for i, step in enumerate(fault["steps"]))
+            cards.append({"title": "模拟排障资料：" + fault["fault_name"] if zh else "Demo troubleshooting: " + fault["fault_name"],
+                          "body": steps})
+        return (("我查到模拟订单，但按演示规则，只有下单 30 天内且授权店铺购买的订单才能整理退货人工审核材料；当前记录不满足 30 天条件。实际渠道政策仍需向购买店铺确认，系统没有提交退货或退款。") if zh else
+                ("I found a demo order, but this demo prepares a return review only for authorized-store orders within 30 days. This fixture does not meet the 30-day condition. Please confirm the retailer's actual policy; no return or refund was submitted."), cards)
+    if "refund_review" in items or "return_review" in items or "replacement_review" in items:
         if fault and fault.get("after_failed") != "honest_escalate_no_fabrication":
             steps = "\n".join(str(i + 1) + ". " + s for i, s in enumerate(fault["steps"]))
             cards.append({"title": "模拟排障资料：" + fault["fault_name"] if zh else "Demo troubleshooting: " + fault["fault_name"],
@@ -681,7 +771,8 @@ def build_reply(case, text, order, fault, allowed, lang, scope, items=None, refe
                               "Product: " + case["product"]["name"] + "; order: " + (case.get("order_id") or "not provided") + "; no refund or replacement was submitted."})
         diagnostic = ("我也找到了该产品的模拟排障步骤，见下方卡片。" if zh else
                       "I also found demo troubleshooting steps in the card.") if fault and fault.get("after_failed") != "honest_escalate_no_fabrication" else ""
-        return (("已分别记录故障与售后诉求。" + diagnostic + "退款或换货需要核对订单归属、购买渠道、商品状态及人工审批；本演示没有发起实际办理。" if zh else
+        request_name = "退货" if case.get("requested_action") == "RETURN_REVIEW" else ("退款" if case.get("requested_action") == "REFUND_REVIEW" else "换货")
+        return (("已记录你的" + request_name + "诉求。" + diagnostic + "仍需核对订单归属、购买渠道和商品状态，并由人工审核；本演示没有发起或提交实际办理。" if zh else
                  "I recorded both the fault and after-sales request. " + diagnostic + " Order ownership, purchase channel and item condition still need checking. No refund or replacement was initiated."), cards)
     if referenced_step:
         if fault and len(fault.get("steps", [])) >= referenced_step:

@@ -16,8 +16,10 @@ def work_items(text, case, order, fault, scope):
         return ["greeting"]
     if case.get("product_state") == "CONFLICTED" or not case.get("product"):
         items.append("confirm_product")
-    if re.search(r"退款|退货|refund|return", t):
+    if re.search(r"退款|refund", t):
         items.append("refund_review")
+    if re.search(r"退货|return", t):
+        items.append("return_review")
     if re.search(r"换货|更换|replace|replacement|exchange", t):
         items.append("replacement_review")
     if case.get("order_id") or re.search(r"订单|质保|保修|order|warranty", t):
@@ -42,7 +44,7 @@ def handoff(case, order, fault, items, reasons):
         "ownership": "NOT_VERIFIED",
         "issue": (case.get("last_issue") or "待补充")[:240],
         "knowledge": fault["fault"] if fault else "未命中",
-        "requests": [i for i in items if i in ("refund_review", "replacement_review", "human_handoff", "shipping_damage_review")],
+        "requests": [i for i in items if i in ("refund_review", "return_review", "replacement_review", "human_handoff", "shipping_damage_review")],
         "missing": [
             label for needed, label in (
                 (not case.get("product") and not case.get("logistics_damage"), "产品型号"),

@@ -6,6 +6,8 @@ checks pass; it is not a real-model success rate or customer resolution rate.
 import csv
 import os
 import sys
+from unittest.mock import patch
+from flask import g
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import app
@@ -81,12 +83,23 @@ def main(path, real=False):
     rows = []
     for scenario, messages in SCENARIOS.items():
         for turn, message in enumerate(messages, 1):
-            response = client.post("/api/chat", json={
-                "message": message, "session_id": "replay-" + scenario, "language": "zh",
-            })
+            if real:
+                response = client.post("/api/chat", json={
+                    "message": message, "session_id": "replay-" + scenario, "language": "zh",
+                })
+            else:
+                def test_adapter(system, user, timeout=15):
+                    g.model_status = "TEST_STUB"
+                    if "intent understanding module" in system:
+                        return '{"is_new_topic": false, "mentioned_product": null, "is_irrelevant": false, "step_number": null}'
+                    return "你好，我也可以继续帮你处理安克产品问题。"
+                with patch.object(app, "call_llm", side_effect=test_adapter):
+                    response = client.post("/api/chat", json={
+                        "message": message, "session_id": "replay-" + scenario, "language": "zh",
+                    })
             data = response.get_json() or {}
             trace = data.get("trace") or {}
-            expected_model = "OK" if real else "NOT_CONFIGURED"
+            expected_model = "OK" if real else "TEST_STUB"
             passed = response.status_code == 200 and trace.get("model_status") == expected_model and check(scenario, turn, data)
             rows.append({"scenario": scenario, "turn": turn, "question": message,
                          "status": "PASS" if passed else "FAIL", "reply": data.get("reply", ""),
