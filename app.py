@@ -633,7 +633,11 @@ def chat():
         case["troubleshooting"] = "NOT_STARTED"
 
     has_fault_claim = bool(re.search(r"故障|坏了|不充|不吸|报错|不工作|error|broken|dead|won't|not working|problem", text, re.I))
+    order_only = bool(re.fullmatch(
+        r"\s*(?:(?:my\s+)?order(?:\s*(?:number|id))?\s*(?:is\s*)?|(?:我的)?订单(?:号|是|为)?\s*)?"
+        r"(?:ORD-\d{4}|DEMO-O-\d+)\s*[.!。]?\s*", text, re.I))
     if (case.get("product") and not case.get("last_issue")
+            and not order_only
             and not re.fullmatch(r"(?:是)?(?:吸奶器|扫地机)", text)
             and (not case.get("requested_action") or has_fault_claim)):
         case["last_issue"] = text
