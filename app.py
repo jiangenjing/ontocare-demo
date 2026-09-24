@@ -385,8 +385,8 @@ def closed_case_response(case, message, request_id, lang):
     order_id = case.get("order_id")
     order = lookup_order(order_id)
     slots, missing = slots_view(case, order, None)
-    reply = ("本次咨询已结束，之前的案件信息已保留。若有新问题，请点“新建案件”。" if lang == "zh" else
-             "This conversation is closed. The case remains available here; use New case for another issue.")
+    reply = ("好的，感谢您联系 Anker 客服！祝您生活愉快，再见～之后需要帮助，随时来找我。" if lang == "zh" else
+             "Thanks for contacting Anker Support! Have a lovely day, and goodbye. Come back anytime if you need help.")
     if not was_closed:
         remember_turn(case, message, reply)
     trace = {"phase": "CLOSED", "slots": slots, "missing_slots": missing,
