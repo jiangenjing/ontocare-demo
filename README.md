@@ -298,7 +298,7 @@ python tests/evaluate_multiturn.py
 
 ## 展示视频
 
-仓库 [`media/`](media/README.md) 收录方案文档中提供的两段演示素材：三场景短演示和完整 Demo 走查。它们用于评委理解交互界面与流程，不应视为独立测试证据或部署状态证明。视频中如果出现模拟订单，应以仓库对应的模拟数据说明为准；不得据此推断连接了官方系统。
+仓库 [`media/`](media/README.md) 收录方案文档中提供的两段演示素材： [三场景短演示 MP4](media/demo-three-scenes.mp4) 与 [完整 Demo 走查 MP4](media/demo-full-walkthrough.mp4)。它们用于评委理解交互界面与流程，不应视为独立测试证据或部署状态证明。视频中如果出现模拟订单，应以仓库对应的模拟数据说明为准；不得据此推断连接了官方系统。
 
 ## 团队与公开作品入口
 
