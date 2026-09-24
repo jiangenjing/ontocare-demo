@@ -212,7 +212,7 @@ function render(t){
   const warrantyLabel=t.warranty==="VALID"&&t.ownership_status==="NOT_VERIFIED"?"VALID（仅模拟订单，归属未核验）":t.warranty;
   const phaseNames={CONSULTATION:"咨询",VERIFY:"核实",TROUBLESHOOT:"排障",REVIEW:"待人工审核",CLOSED:"已结束"};
   const phaseText=lang==="zh"&&phaseNames[t.phase]?`${phaseNames[t.phase]} (${t.phase})`:t.phase;
-  const rows=[["业务阶段",phaseText],["近期保留轮次",t.memory_turns],["产品",t.product],["产品判断",t.product_state],["模型候选",t.model_candidate],["订单",t.order],["订单状态",t.order_status],["订单来源",t.order_source],["归属核验",t.ownership_status],["质保",warrantyLabel],["经销商",t.dealer],["排障",t.troubleshooting],["用户反馈排障无效",t.user_reported_failure?"已记录，未核验":"未记录"],["知识来源",t.knowledge_source],["模型",t.model_status],["规则版本",t.rule_version],["请求 ID",t.request_id],["图片",t.image]];
+  const rows=[["业务阶段",phaseText],["近期保留轮次",t.memory_turns],["产品",t.product],["产品判断",t.product_state],["模型候选",t.model_candidate],["订单",t.order],["订单状态",t.order_status],["订单来源",t.order_source],["归属核验",t.ownership_status],["质保",warrantyLabel],["经销商",t.dealer],["卖家匹配",t.dealer_match||"无匹配"],["卖家相似度",t.dealer_match_score],["排障",t.troubleshooting],["用户反馈排障无效",t.user_reported_failure?"已记录，未核验":"未记录"],["知识来源",t.knowledge_source],["模型",t.model_status],["规则版本",t.rule_version],["请求 ID",t.request_id],["图片",t.image]];
   let h=`<div class="panel"><div class="pt">感知与证据</div><div class="chips">${emoTag(t.emotion)}</div>
          <div class="grid2" style="margin-top:7px">${rows.map(r=>`<div class="kv"><span>${esc(r[0])}</span><b>${esc(r[1])}</b></div>`).join("")}</div></div>`;
   const slotNames={product:"产品",order_id:"订单号",order_record:"测试订单",symptom:"用户故障描述",knowledge:"模拟知识",requested_action:"售后诉求",purchase_proof:"购买凭证"};

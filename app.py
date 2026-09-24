@@ -7,6 +7,7 @@ Anker Ontology-Driven Service Agent — MVP 后端
 运行：pip install flask  &&  python app.py   打开 http://127.0.0.1:5000
 """
 import json, os, re, math, uuid
+from difflib import SequenceMatcher
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 import urllib.request
@@ -309,21 +310,34 @@ def lookup_order(order_id: str | None):
             "warranty_until": o["warranty_until"], "within_30d": within_30d}
 
 def match_dealer(country: str | None, seller: str | None):
-    """Country 精确 + Seller 模糊。"""
+    """Country exact + conservative normalized/fuzzy seller match."""
     if not country or not seller:
         return {"status": "INSUFFICIENT_INFO"}
-    sl = seller.strip().lower().replace("-", " ").replace(".", "").replace("  ", " ")
+    ignored = {"gmbh", "llc", "inc", "incorporated", "ltd", "limited", "co", "company",
+               "official", "store", "shop", "seller", "online"}
+    def normalize(value):
+        return " ".join(token for token in re.findall(r"[a-z0-9]+", value.lower()) if token not in ignored)
+
+    query = normalize(seller)
+    candidates = {}
     for d in DEALERS:
         if d["country"].lower() != country.strip().lower():
             continue
         for name in d["seller_names"]:
-            nl = name.lower().replace("-", " ").replace(".", "").replace("  ", " ")
-            if sl == nl:
-                return {"status": "AUTHORIZED" if d["authorized"] else "NOT_AUTHORIZED",
-                        "matched": name}
+            alias = normalize(name)
+            score = 1.0 if query == alias else SequenceMatcher(None, query, alias).ratio()
+            prior = candidates.get(d["id"])
+            if prior is None or score > prior["score"]:
+                candidates[d["id"]] = {"dealer": d, "matched": name, "score": score}
+    ranked = sorted(candidates.values(), key=lambda x: x["score"], reverse=True)
+    if ranked and ranked[0]["score"] >= 0.90 and (len(ranked) == 1 or ranked[0]["score"] - ranked[1]["score"] >= 0.04):
+        winner = ranked[0]
+        return {"status": "AUTHORIZED" if winner["dealer"]["authorized"] else "NOT_AUTHORIZED",
+                "matched": winner["matched"], "score": round(winner["score"], 3)}
     # The business rule treats a seller absent from the country-scoped
     # authorization list as non-authorized; never infer authorization by LLM.
-    return {"status": "NOT_AUTHORIZED", "matched": None}
+    return {"status": "NOT_AUTHORIZED", "matched": None,
+            "score": round(ranked[0]["score"], 3) if ranked else None}
 
 # ---------- 3. Decision Ontology：状态 → 合法动作空间（核心） ----------
 def allowed_actions(case: dict, asked_refund: bool = False, asked_replacement: bool = False,
@@ -552,12 +566,14 @@ def chat():
         dealer_match = match_dealer(order["order"]["country"], order["order"]["seller"])
         case["dealer"] = dealer_match["status"]
         case["dealer_match"] = dealer_match.get("matched")
+        case["dealer_match_score"] = dealer_match.get("score")
         case["within_30d"] = order["within_30d"]
         sku = order["order"]["sku"]
     else:
         sku = None
         if explicit_order:
-            case.update(warranty="UNKNOWN", dealer="UNKNOWN", dealer_match=None, within_30d=False)
+            case.update(warranty="UNKNOWN", dealer="UNKNOWN", dealer_match=None,
+                        dealer_match_score=None, within_30d=False)
     product_result = resolve_product(text, sku)
     # A fixture order can suggest a product, but a conflicting customer claim
     # must be resolved before applying that fixture's warranty to this issue.
@@ -665,6 +681,7 @@ def chat():
              "order": order_id or "未提供",
              "seller": order["order"]["seller"] if order["status"] == "FOUND" else "未提供",
              "dealer_match": case.get("dealer_match"),
+             "dealer_match_score": case.get("dealer_match_score"),
              "order_status": order["status"], "order_source": "TEST_FIXTURE" if order["status"] == "FOUND" else ("USER_CLAIM" if order_id else "NONE"),
              "ownership_status": "NOT_VERIFIED",
              "warranty": case["warranty"], "dealer": case["dealer"],
