@@ -58,7 +58,11 @@ class M0Flow(unittest.TestCase):
         _, followup = self.ask("第二步没看懂", "a")
         self.assertIn("Breast Pump", followup["trace"]["product"])
         self.assertEqual(followup["trace"]["troubleshooting"], "NEEDS_GUIDANCE")
-        _, other = self.ask("你好", "b")
+        def friendly(*args, **kwargs):
+            g.model_status = "OK"
+            return "你好，有什么安克产品问题需要帮忙？"
+        with patch.object(m, "call_llm", friendly):
+            _, other = self.ask("你好", "b")
         self.assertEqual(other["trace"]["product"], "未确定")
 
     def test_t10_model_failure_reports_error(self):

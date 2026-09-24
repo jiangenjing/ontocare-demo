@@ -1,5 +1,7 @@
 """Checks for the transferred workflow on the real Flask route, without a model key."""
 import unittest
+from unittest.mock import patch
+from flask import g
 import app
 
 
@@ -21,7 +23,7 @@ class ServiceWorkflow(unittest.TestCase):
         self.assertIn("diagnosis", trace["work_items"])
         self.assertIn("refund_review", trace["work_items"])
         self.assertEqual(trace["knowledge_source"], "not_charging")
-        self.assertTrue(any("troubleshooting" in card["title"].lower()
+        self.assertTrue(any(("troubleshooting" in card["title"].lower() or "排障资料" in card["title"])
                             for card in result["cards"]))
         self.assertIn("direct_refund", trace["forbidden"])
         self.assertEqual(trace["handoff"]["status"], "DRAFT_NOT_SUBMITTED")
@@ -54,7 +56,8 @@ class ServiceWorkflow(unittest.TestCase):
 
     def test_separate_sessions_do_not_share_context(self):
         self.ask("ORD-2002 robot won't charge", session="a")
-        other = self.ask("Hello", session="b")
+        with patch.object(app, "call_llm", side_effect=self.fake_chat_reply("Hello!")):
+            other = self.ask("Hello", session="b")
         self.assertEqual(other["trace"]["order_status"], "NOT_PROVIDED")
         self.assertEqual(other["trace"]["product"], "未确定")
 
@@ -74,12 +77,61 @@ class ServiceWorkflow(unittest.TestCase):
 
     def test_plain_greeting_keeps_case_and_mixed_greeting_handles_issue(self):
         self.ask("ORD-2002 robot won't charge")
-        hello = self.ask("hi", language="en")
+        with patch.object(app, "call_llm", side_effect=self.fake_chat_reply("Hello!")):
+            hello = self.ask("hi", language="en")
         self.assertEqual(hello["trace"]["order"], "ORD-2002")
-        self.assertEqual(hello["trace"]["work_items"], ["greeting"])
-        mixed = self.ask("hi, robot won't charge", language="en")
+        self.assertEqual(hello["trace"]["work_items"], ["light_chat"])
+        with patch.object(app, "call_llm", side_effect=self.fake_chat_reply("Hello!")):
+            mixed = self.ask("hi, robot won't charge", language="en")
         self.assertIn("diagnosis", mixed["trace"]["work_items"])
         self.assertNotEqual(mixed["trace"]["work_items"], ["greeting"])
+
+    @staticmethod
+    def fake_chat_reply(reply):
+        def respond(system, user, timeout=15):
+            g.model_status = "OK"
+            if "intent understanding module" in system:
+                return '{"is_new_topic": true, "mentioned_product": null, "is_irrelevant": false, "step_number": null}'
+            return reply
+        return respond
+
+    def test_return_without_order_asks_for_order_before_judging(self):
+        result = self.ask("我要退货")
+        trace = result["trace"]
+        self.assertEqual(trace["phase"], "VERIFY")
+        self.assertEqual(trace["order_status"], "NOT_PROVIDED")
+        self.assertEqual(trace["slots"]["requested_action"]["value"], "RETURN_REVIEW")
+        self.assertIn("订单号", result["reply"])
+        self.assertNotIn("已过保", result["reply"])
+        self.assertIn("prepare_return_review", trace["forbidden"])
+
+    def test_old_unmatched_order_is_not_silently_applied_to_return(self):
+        self.ask("DEMO-O-999官网查不到，是否过保？")
+        result = self.ask("我要退货")
+        self.assertEqual(result["trace"]["order_status"], "NOT_FOUND")
+        self.assertEqual(result["trace"]["order"], "DEMO-O-999")
+        self.assertIn("之前记录的订单号", result["reply"])
+        self.assertIn("确认或更正", result["reply"])
+        self.assertIn("不代表过保", result["reply"])
+
+    def test_unauthorized_seller_is_routed_back_to_store(self):
+        result = self.ask("ORD-2004 我要退货")
+        self.assertEqual(result["trace"]["dealer"], "NOT_AUTHORIZED")
+        self.assertIn("Shady Local Shop", result["reply"])
+        self.assertIn("联系购买店铺", result["reply"])
+        self.assertIn("guide_contact_seller", result["trace"]["allowed"])
+        self.assertIn("prepare_return_review", result["trace"]["forbidden"])
+
+    def test_authorized_recent_return_only_prepares_human_review(self):
+        result = self.ask("ORD-2016 我要退货")
+        self.assertEqual(result["trace"]["dealer"], "AUTHORIZED")
+        self.assertIn("prepare_return_review", result["trace"]["allowed"])
+        self.assertIn("direct_refund", result["trace"]["forbidden"])
+        relations = {edge["relation"] for edge in result["trace"]["ontology_relations"]}
+        self.assertTrue({"CONTAINS", "SOLD_BY", "INSTANCE_OF"}.issubset(relations))
+        self.assertNotIn("HAS_ISSUE", relations)  # No symptom was actually reported in this turn.
+        self.assertEqual(result["trace"]["handoff"]["status"], "DRAFT_NOT_SUBMITTED")
+        self.assertIn("没有", result["reply"])
 
     def test_unrequested_refund_reason_is_hidden_but_action_still_blocked(self):
         result = self.ask("ORD-2002 robot won't charge")

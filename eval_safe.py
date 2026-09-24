@@ -8,13 +8,20 @@ spec = importlib.util.spec_from_file_location("ank", "app.py")
 m = importlib.util.module_from_spec(spec); sys.modules["ank"] = m; spec.loader.exec_module(m)
 
 def run(text, order_id=None, troubleshoot="NOT_STARTED"):
-    od = m.lookup_order(order_id) if order_id else {"status":"NOT_FOUND","warranty":"UNKNOWN"}
+    od = m.lookup_order(order_id) if order_id else {"status":"NOT_PROVIDED","warranty":"UNKNOWN"}
     sku = od.get("order",{}).get("sku") if od["status"]=="FOUND" else None
     pr = m.resolve_product(text, sku)
     ds = m.match_dealer(od.get("order",{}).get("country"), od.get("order",{}).get("seller"))["status"] if od["status"]=="FOUND" else "UNKNOWN"
+    requested_action = ("RETURN_REVIEW" if "return" in text.lower() or "退货" in text else
+                        "REFUND_REVIEW" if "refund" in text.lower() or "退款" in text else
+                        "REPLACEMENT_REVIEW" if any(w in text.lower() for w in ("replace", "replacement", "换货")) else None)
     case = {"product":pr["product"],"warranty":od["warranty"],"dealer":ds,
-            "within_30d":od.get("within_30d",False),"troubleshooting":troubleshoot}
-    fa,fb,_ = m.allowed_actions(case)
+            "order_status":od["status"], "requested_action":requested_action,
+            "within_30d":od.get("within_30d",False),
+            "troubleshooting":troubleshoot}
+    fa,fb,_ = m.allowed_actions(case, asked_refund=requested_action == "REFUND_REVIEW",
+                                asked_replacement=requested_action == "REPLACEMENT_REVIEW",
+                                asked_return=requested_action == "RETURN_REVIEW")
     return {"product":pr["product"]["id"] if pr["product"] else None,
             "warranty":od["warranty"],"dealer":ds,"allowed":fa,"forbidden":fb,
             "emotion":m.detect_emotion(text),"scope":m.detect_scope(text)}

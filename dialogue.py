@@ -81,7 +81,7 @@ def slots_view(case, order, fault):
     missing = []
     if not product and not case.get("logistics_damage"):
         missing.append("产品型号")
-    if not case.get("last_issue") and not case.get("logistics_damage"):
+    if not case.get("last_issue") and not case.get("logistics_damage") and not case.get("requested_action"):
         missing.append("具体故障")
     if case.get("requested_action") and order["status"] != "FOUND":
         missing.append("订单号与购买凭证")

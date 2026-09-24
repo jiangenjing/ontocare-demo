@@ -1,0 +1,28 @@
+{
+  "name": "Anker after-sales service ontology",
+  "version": "m0-ontology-1",
+  "entities": [
+    "Customer", "Order", "Product", "SKU", "Seller", "Case", "Issue",
+    "Evidence", "Policy", "Action", "Approval", "Resolution"
+  ],
+  "relationships": {
+    "PLACED": {"domain": "Customer", "range": "Order"},
+    "CONTAINS": {"domain": "Order", "range": "SKU"},
+    "INSTANCE_OF": {"domain": "SKU", "range": "Product"},
+    "SOLD_BY": {"domain": "Order", "range": "Seller"},
+    "HAS_ISSUE": {"domain": "Case", "range": "Issue"},
+    "HAS_EVIDENCE": {"domain": "Case", "range": "Evidence"},
+    "APPLIES_TO": {"domain": "Policy", "range": "Action"},
+    "AUTHORIZES": {"domain": "Approval", "range": "Action"},
+    "HAS_RESOLUTION": {"domain": "Case", "range": "Resolution"}
+  },
+  "case_states": ["CONSULTATION", "VERIFY", "TROUBLESHOOT", "REVIEW", "CLOSED"],
+  "actions": [
+    "ask_order", "ask_product", "search_knowledge", "run_troubleshooting",
+    "escalate_human", "ask_country", "ask_seller", "request_proof",
+    "prepare_return_review", "prepare_replacement_review", "propose_paid_repair",
+    "guide_contact_seller", "prepare_human_handoff", "request_package_photos",
+    "prepare_shipping_review", "direct_refund", "propose_replacement",
+    "tell_expired", "arrange_reshipment", "new_case"
+  ]
+}
