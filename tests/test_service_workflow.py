@@ -155,6 +155,14 @@ class ServiceWorkflow(unittest.TestCase):
         self.assertEqual(result["trace"]["handoff"]["status"], "DRAFT_NOT_SUBMITTED")
         self.assertIn("没有", result["reply"])
 
+    def test_order_only_turn_does_not_create_a_false_issue_relation(self):
+        result = self.ask("ORD-2010")
+        self.assertEqual(result["trace"]["order_status"], "FOUND")
+        self.assertIsNone(result["trace"]["slots"]["symptom"]["value"])
+        relations = {edge["relation"] for edge in result["trace"]["ontology_relations"]}
+        self.assertTrue({"CONTAINS", "SOLD_BY", "INSTANCE_OF"}.issubset(relations))
+        self.assertNotIn("HAS_ISSUE", relations)
+
     def test_unrequested_refund_reason_is_hidden_but_action_still_blocked(self):
         result = self.ask("ORD-2002 robot won't charge")
         self.assertIn("direct_refund", result["trace"]["forbidden"])
